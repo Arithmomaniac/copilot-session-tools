@@ -2,6 +2,7 @@
 
 import sqlite3
 from pathlib import Path
+from typing import cast
 
 import ssrjson
 
@@ -29,6 +30,7 @@ from .shared import (
     extract_command_run,
     normalize_invocation_message,
     normalize_tool_status,
+    strip_ansi_control_sequences,
 )
 
 RawBlock = (
@@ -54,6 +56,90 @@ RawBlock = (
         str,  # prompt
     ]
 )
+
+
+def _response_text(value: object) -> str:
+    """Extract sanitized text from a VS Code string or MarkdownString."""
+    if isinstance(value, str):
+        return strip_ansi_control_sequences(value)
+    if isinstance(value, dict):
+        nested = cast("dict[str, object]", value).get("value")
+        if isinstance(nested, str):
+            return strip_ansi_control_sequences(nested)
+    return ""
+
+
+def _format_question_carousel(item: dict) -> str:
+    parts = []
+    message = _response_text(item.get("message"))
+    if message:
+        parts.append(message)
+
+    answers = item.get("data")
+    answer_map = answers if isinstance(answers, dict) else {}
+    questions = item.get("questions")
+    if not isinstance(questions, list):
+        questions = []
+
+    for index, question in enumerate(questions, start=1):
+        if not isinstance(question, dict):
+            continue
+        title = _response_text(question.get("title")) or f"Question {index}"
+        prompt = _response_text(question.get("message"))
+        line = f"{index}. **{title}**"
+        if prompt and prompt != title:
+            line += f": {prompt}"
+        options = question.get("options")
+        if isinstance(options, list):
+            labels = [_response_text(option.get("label")) for option in options if isinstance(option, dict)]
+            labels = [label for label in labels if label]
+            if labels:
+                line += f"\n   Options: {', '.join(labels)}"
+        question_id = question.get("id")
+        if isinstance(question_id, str) and question_id in answer_map:
+            answer = answer_map[question_id]
+            if isinstance(answer, dict):
+                answer = answer.get("selectedValue") or answer.get("selectedValues") or answer.get("freeformValue")
+            if isinstance(answer, list):
+                answer = ", ".join(str(value) for value in answer)
+            if answer not in (None, ""):
+                line += f"\n   Answer: {answer}"
+        parts.append(line)
+
+    if item.get("isUsed") and not answer_map:
+        parts.append("Answered")
+    return "\n\n".join(parts)
+
+
+def _format_interactive_response(item: dict) -> str:
+    parts = []
+    title = _response_text(item.get("title"))
+    message = _response_text(item.get("message"))
+    content = _response_text(item.get("content"))
+    if title:
+        parts.append(f"**{title}**")
+    if message:
+        parts.append(message)
+    if content:
+        parts.append(content)
+
+    buttons = item.get("buttons")
+    if isinstance(buttons, list):
+        labels = [str(button) for button in buttons if button]
+        if labels:
+            parts.append(f"Options: {', '.join(labels)}")
+
+    state = _response_text(item.get("state"))
+    data = item.get("data")
+    if state:
+        parts.append(f"Response: {state}")
+    elif isinstance(data, dict):
+        action = _response_text(data.get("action") or data.get("actionId"))
+        if data.get("rejected"):
+            parts.append("Response: rejected")
+        elif action:
+            parts.append(f"Response: {action}")
+    return "\n\n".join(parts)
 
 
 def _parse_tool_invocation_serialized(item: dict) -> ToolInvocation | None:
@@ -397,6 +483,38 @@ def _process_response_items(
                     response_content.append(inline_text)
                     raw_blocks.append(("toolInvocation", inline_text, None))
 
+            elif kind == "questionCarousel":
+                content = _format_question_carousel(item)
+                if content:
+                    response_content.append(content)
+                    raw_blocks.append(("ask_user", content, "questions"))
+            elif kind in ("elicitationSerialized", "confirmation", "planReview"):
+                content = _format_interactive_response(item)
+                if content:
+                    response_content.append(content)
+                    raw_blocks.append(("ask_user", content, kind))
+            elif kind in ("progressMessage", "systemNotification", "warning", "info"):
+                content = _response_text(item.get("content"))
+                if content:
+                    response_content.append(content)
+                    raw_blocks.append(("status", content, kind))
+            elif kind == "hook":
+                hook_type = _response_text(item.get("hookType"))
+                message = _response_text(item.get("stopReason") or item.get("systemMessage"))
+                if message:
+                    label = f"{hook_type}: {message}" if hook_type else message
+                    response_content.append(label)
+                    raw_blocks.append(("status", label, "hook"))
+            elif kind == "autoModeResolution":
+                resolved = item.get("resolved")
+                model = _response_text(resolved.get("name") or resolved.get("id")) if isinstance(resolved, dict) else ""
+                label = f"Auto selected {model}" if model else "Auto is selecting a model"
+                response_content.append(label)
+                raw_blocks.append(("status", label, "auto-mode"))
+            elif kind == "disabledClaudeHooks":
+                label = "Claude hooks are disabled"
+                response_content.append(label)
+                raw_blocks.append(("status", label, "warning"))
             # Extract text content with kind info
             elif item.get("value"):
                 value = item["value"]

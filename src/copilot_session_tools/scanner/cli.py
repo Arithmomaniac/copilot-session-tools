@@ -23,8 +23,8 @@ from .models import (
     ShellIOEntry,
     ToolInvocation,
 )
+from .shared import strip_ansi_control_sequences
 
-_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-9;]*[A-Za-z]|\][^\x07]*\x07|\][^\x1b]*\x1b\\)")
 _SESSION_ID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _SESSION_REFERENCE_PATTERN = re.compile(
     rf'(?:"(?P<name>[^"\n]+)" \((?P<named_id>{_SESSION_ID_PATTERN})\)|(?P<bare_id>{_SESSION_ID_PATTERN}))',
@@ -61,7 +61,7 @@ def _stringify_event_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return _ANSI_ESCAPE_PATTERN.sub("", value).strip()
+        return strip_ansi_control_sequences(value)
     if isinstance(value, bool | int | float):
         return str(value)
     if isinstance(value, list):
@@ -171,6 +171,11 @@ def _format_session_event_status(event_type: str, event_data: dict) -> tuple[str
     if event_type == "auto_mode_switch.completed":
         response = _stringify_event_value(event_data.get("response"))
         return f"Auto mode switch completed: {response}" if response else "Auto mode switch completed", "auto-mode"
+    if event_type == "session.auto_mode_resolved":
+        model = _stringify_event_value(event_data.get("chosenModel"))
+        bucket = _stringify_event_value(event_data.get("reasoningBucket"))
+        details = f" ({bucket} reasoning)" if bucket else ""
+        return f"Auto selected {model}{details}" if model else "Auto model resolved", "auto-mode"
     if event_type == "command.queued":
         command = _stringify_event_value(event_data.get("command"))
         return f"Command queued: {command}" if command else "Command queued", "command"
@@ -250,6 +255,77 @@ def _format_session_event_status(event_type: str, event_data: dict) -> tuple[str
         partial = _stringify_event_value(event_data.get("partialOutput"))
         return f"Tool partial result: {partial}" if partial else "Tool partial result", "tool-progress"
     return None
+
+
+_FUSION_PHASE_LABELS = {
+    "primary": "Drafted answer",
+    "draft": "Drafted",
+    "judge": "Checked",
+    "repair": "Repaired",
+    "critic": "Reviewed",
+    "revision": "Revised",
+    "follow_up": "Continued",
+}
+
+
+def _build_fusion_statuses(events: list[dict]) -> dict[str, str]:
+    """Reduce durable HydraFusion events to one safe transcript status per run."""
+    summaries: dict[str, dict[str, object]] = {}
+
+    for event in events:
+        event_type = event.get("type")
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        fusion_id = data.get("fusionId")
+        if not isinstance(fusion_id, str) or not fusion_id:
+            continue
+
+        summary = summaries.setdefault(fusion_id, {"milestones": []})
+        milestones = cast("list[str]", summary["milestones"])
+
+        if event_type == "session.fusion_resolved":
+            summary["pattern"] = data.get("pattern")
+            summary["primaryModel"] = data.get("primaryModel")
+            summary["secondaryModel"] = data.get("secondaryModel")
+        elif event_type == "assistant.fusion_phase_completed":
+            phase_kind = _stringify_event_value(data.get("phaseKind"))
+            label = _FUSION_PHASE_LABELS.get(phase_kind, phase_kind.replace("_", " ").title())
+            verdict = _stringify_event_value(data.get("verdict"))
+            if phase_kind == "judge" and verdict == "accept":
+                label = "Accepted"
+            elif phase_kind == "judge" and verdict == "reject":
+                label = "Changes requested"
+            if label and label not in milestones:
+                milestones.append(label)
+        elif event_type == "assistant.fusion_phase_failed":
+            phase_kind = _stringify_event_value(data.get("phaseKind"))
+            label = _FUSION_PHASE_LABELS.get(phase_kind, phase_kind.replace("_", " ").title())
+            failure = f"Warning: {label or 'Fusion phase'} failed"
+            if data.get("degradedToPhaseId"):
+                failure += "; continuing with reduced Fusion coverage"
+            milestones.append(failure)
+        elif event_type == "session.fusion_completed":
+            degraded = data.get("outcome") == "degraded" or bool(data.get("degradedReason"))
+            milestones.append("Warning: final response prepared with reduced Fusion coverage" if degraded else "Final response prepared")
+            summary["completed"] = True
+
+    statuses: dict[str, str] = {}
+    for fusion_id, summary in summaries.items():
+        pattern = _stringify_event_value(summary.get("pattern"))
+        pattern_label = pattern.title() if pattern else "Workflow"
+        models = [
+            _stringify_event_value(summary.get("primaryModel")),
+            _stringify_event_value(summary.get("secondaryModel")),
+        ]
+        model_text = " + ".join(model for model in models if model)
+        header = f"Fusion · {pattern_label}"
+        if model_text:
+            header += f" · {model_text}"
+        milestones = cast("list[str]", summary["milestones"])
+        statuses[fusion_id] = "; ".join([header, *milestones])
+
+    return statuses
 
 
 def _parse_workspace_yaml(session_dir: Path) -> dict[str, str]:
@@ -689,6 +765,8 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
 
         if not events:
             return None
+
+        fusion_statuses = _build_fusion_statuses(events)
 
         # Extract session metadata from session.start event
         session_id = None
@@ -1267,6 +1345,12 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                     fork_message = _format_fork_info_message(message, session_id)
                     builder.current_assistant_content_blocks.append(ContentBlock(kind="status", content=fork_message, description="fork"))
 
+            elif event_type == "session.fusion_resolved":
+                fusion_id = _stringify_event_value(event_data.get("fusionId"))
+                status = fusion_statuses.get(fusion_id)
+                if status:
+                    builder.current_assistant_content_blocks.append(ContentBlock(kind="status", content=status, description="fusion"))
+
             elif event_type == "session.handoff":
                 source_type = event_data.get("sourceType") or "unknown"
                 repo = event_data.get("repository") or {}
@@ -1419,6 +1503,13 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                 "assistant.message_delta",
                 "assistant.reasoning_delta",
                 "assistant.streaming_delta",
+                "assistant.tool_call_delta",
+                "assistant.server_tool_progress",
+                "assistant.fusion_phase_activity",
+                "assistant.fusion_phase_started",
+                "assistant.fusion_phase_completed",
+                "assistant.fusion_phase_failed",
+                "assistant.turn_retry",
                 # Plan mode lifecycle
                 "exit_plan_mode.requested",
                 "exit_plan_mode.completed",
@@ -1434,6 +1525,8 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                 "session.canvas.opened",
                 "session.canvas.closed",
                 "session.canvas.registry_changed",
+                "session.canvas.recorded",
+                "session.canvas.removed",
                 "session.custom_notification",
                 "session.custom_agents_updated",
                 "session.extensions_loaded",
@@ -1450,6 +1543,31 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                 "session.todos_changed",
                 "session.tools_updated",
                 "session.usage_info",
+                "session.usage_checkpoint",
+                "session.context_cleared",
+                "session.fusion_commit_started",
+                "session.fusion_completed",
+                "session.fusion_handoff",
+                "session.fusion_route_started",
+                "session.fusion_route_failed",
+                "subagent.configured",
+                "skill.context_delivered",
+                "skill.context_delivered_ref",
+                "skill.invoked_ref",
+                "model.call_start",
+                "model.call_finished",
+                "permission.carriedForward",
+                "permission.messageAuthorization",
+                "permission.messageAuthorizationDegraded",
+                "permission.messageAuthorizationRead",
+                "prompt_cache_break",
+                "sandbox.decision",
+                "session.completion_receipt",
+                "session.session_limits_changed",
+                "tool_search.activated",
+                "factory.run_started",
+                "factory.run_updated",
+                "factory.run_settled",
             ):
                 pass
 

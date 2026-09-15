@@ -4,7 +4,18 @@ Provides normalizations that ensure both scanners produce compatible output
 for the same logical concepts (status values, command runs, invocation messages).
 """
 
+import re
+
 from .models import CommandRun
+
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-9;]*[A-Za-z]|\][^\x07]*\x07|\][^\x1b]*\x1b\\)")
+_CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_ansi_control_sequences(text: str) -> str:
+    """Remove terminal escape sequences and non-printing control characters."""
+    return _CONTROL_CHARACTER_PATTERN.sub("", _ANSI_ESCAPE_PATTERN.sub("", text)).strip()
+
 
 # ---------------------------------------------------------------------------
 # Status normalisation  (Issue #55 — D1)
