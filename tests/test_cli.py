@@ -1,6 +1,7 @@
 """Tests for the CLI module."""
 
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,6 +70,36 @@ class TestCLI:
         assert result.exit_code == 0
         assert "Scanning" in result.output
 
+    def test_sources_add_list_rename_disable_enable(self, runner, tmp_path):
+        db_path = tmp_path / "archive.db"
+        source_dir = tmp_path / "scout"
+        source_dir.mkdir()
+        with sqlite3.connect(source_dir / "session-store.db") as conn:
+            conn.executescript(
+                """
+                CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                CREATE TABLE turns (session_id TEXT, turn_index INTEGER);
+                """
+            )
+
+        added = runner.invoke(
+            app,
+            ["sources", "add", "--db", str(db_path), "--name", "Scout", "--base-dir", str(source_dir)],
+        )
+        listed = runner.invoke(app, ["sources", "list", "--db", str(db_path)])
+        renamed = runner.invoke(
+            app,
+            ["sources", "rename", "--db", str(db_path), "Scout", "--name", "Microsoft Scout"],
+        )
+        disabled = runner.invoke(app, ["sources", "disable", "--db", str(db_path), "Microsoft Scout"])
+        enabled = runner.invoke(app, ["sources", "enable", "--db", str(db_path), "Microsoft Scout"])
+
+        assert added.exit_code == 0
+        assert "scout" in listed.output
+        assert renamed.exit_code == 0
+        assert disabled.exit_code == 0
+        assert enabled.exit_code == 0
+
     def test_stats_command(self, runner, temp_db_with_data):
         """Test stats command."""
         result = runner.invoke(app, ["stats", "--db", str(temp_db_with_data)])
@@ -89,6 +120,17 @@ class TestCLI:
         assert result.exit_code == 0
         # Should find results
         assert "CLI test" in result.output or "result" in result.output.lower()
+
+    def test_search_unknown_source_has_friendly_error(self, runner, temp_db_with_data):
+        result = runner.invoke(
+            app,
+            ["search", "--db", str(temp_db_with_data), "--source", "missing", "Hello"],
+        )
+
+        assert result.exit_code == 1
+        assert "Error: Source not found: missing" in result.output
+        assert result.exception is not None
+        assert not isinstance(result.exception, ValueError)
 
     def test_search_no_results(self, runner, temp_db_with_data):
         """Test search command with no results."""

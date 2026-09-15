@@ -340,6 +340,55 @@ class TestDatabase:
         sessions = temp_db.list_sessions()
         assert len(sessions) == 2
 
+    def test_list_sessions_limit_uses_final_updated_at_order(self, temp_db):
+        temp_db.add_session(
+            ChatSession(
+                session_id="newest-update",
+                workspace_name="newest",
+                workspace_path="/newest",
+                messages=[ChatMessage(role="user", content="newest", timestamp="2026-01-01T00:00:00Z")],
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-09-15T12:00:00Z",
+                vscode_edition="stable",
+            )
+        )
+        temp_db.add_session(
+            ChatSession(
+                session_id="newest-message",
+                workspace_name="older",
+                workspace_path="/older",
+                messages=[ChatMessage(role="user", content="older", timestamp="2026-09-15T11:00:00Z")],
+                created_at="2026-01-02T00:00:00Z",
+                updated_at="2026-09-14T12:00:00Z",
+                vscode_edition="stable",
+            )
+        )
+
+        assert temp_db.list_sessions(limit=1) == temp_db.list_sessions()[:1]
+        assert temp_db.list_sessions(limit=1)[0]["session_id"] == "newest-update"
+
+    def test_list_sessions_limit_does_not_count_empty_chronicle_sessions(self, tmp_path):
+        chronicle_path = str(tmp_path / "session-store.db")
+        _create_builtin_only_db(chronicle_path)
+        _insert_builtin_session(
+            chronicle_path,
+            "empty-newest",
+            summary="Empty",
+            updated_at="2026-09-15T12:00:00Z",
+        )
+        _insert_builtin_session(
+            chronicle_path,
+            "nonempty-older",
+            summary="Nonempty",
+            updated_at="2026-09-14T12:00:00Z",
+        )
+        _insert_builtin_turn(chronicle_path, "nonempty-older", 0, "question", "answer")
+        database = Database(tmp_path / "archive.db")
+
+        sessions = database.list_sessions(limit=1)
+
+        assert [session["session_id"] for session in sessions] == ["nonempty-older"]
+
     def test_list_sessions_filter_by_workspace(self, temp_db, sample_session):
         """Test filtering sessions by workspace."""
         temp_db.add_session(sample_session)
@@ -2719,6 +2768,12 @@ class TestSchemaV6:
 
         # Old data should be gone (drop/recreate wipes everything)
         assert conn.execute("SELECT COUNT(*) FROM cst_sessions").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT name FROM cst_sources WHERE source_id = 'default-cli'",
+            ).fetchone()[0]
+            == "cli"
+        )
 
         # New columns should exist
         msg_cols = {row[1] for row in conn.execute("PRAGMA table_info(cst_messages)")}

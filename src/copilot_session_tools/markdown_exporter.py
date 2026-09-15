@@ -284,6 +284,8 @@ def session_to_markdown(
         lines.append(f"- **Updated:** {_format_timestamp(session.updated_at)}")
 
     lines.append(f"- **Edition:** `{session.vscode_edition}`")
+    if session.source_name:
+        lines.append(f"- **Source:** {session.source_name}")
     lines.append(f"- **Messages:** {len(session.messages)}")
 
     if session.requester_username:

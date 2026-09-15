@@ -264,8 +264,8 @@ _SORT_ORDER_CLAUSES = {
             THEN (JULIANDAY(DATETIME(CAST(s.created_at AS REAL) / 1000, 'unixepoch')) - JULIANDAY('2020-01-01')) * 0.001
             ELSE 0
         END
-    )""",
-    "date": "ORDER BY s.created_at DESC",
+    ), s.session_id, m.message_index""",
+    "date": "ORDER BY s.created_at DESC, s.session_id, m.message_index",
 }
 
 
@@ -402,6 +402,7 @@ def _fork_duplicate_filter_clause(duplicate_content_clause: str = "COALESCE(dm.c
                 JOIN cst_sessions ds ON dm.session_id = ds.session_id
                 WHERE dm.source_event_id = m.source_event_id
                   AND dm.session_id != m.session_id
+                  AND COALESCE(ds.source_id, '') = COALESCE(s.source_id, '')
                   AND ({duplicate_content_clause})
                   AND (
                       COALESCE(ds.created_at, '') < COALESCE(s.created_at, '')
@@ -431,7 +432,7 @@ def _search_builtin_index(conn: sqlite3.Connection, fts_query: str, limit: int) 
     builtin_results: dict[str, dict] = {}
     try:
         rows = conn.execute(
-            "SELECT session_id, content, rank FROM chronicle.search_index WHERE chronicle.search_index MATCH ? ORDER BY rank LIMIT ?",
+            "SELECT session_id, content, rank FROM chronicle.search_index WHERE search_index MATCH ? ORDER BY rank, session_id LIMIT ?",
             (fts_query, limit * 2),
         ).fetchall()
         for row in rows:

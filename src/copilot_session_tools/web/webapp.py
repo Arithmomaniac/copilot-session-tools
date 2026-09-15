@@ -2,6 +2,7 @@
 
 import json
 import re
+import secrets
 
 from flask import Flask, flash, jsonify, make_response, redirect, render_template, request, session, url_for
 
@@ -9,6 +10,7 @@ from copilot_session_tools import Database, __version__, generate_session_filena
 from copilot_session_tools.content_types import SEARCH_CONTENT_TYPES, resolve_search_content_set
 from copilot_session_tools.html_exporter import generate_session_html_filename, session_to_html
 from copilot_session_tools.refresh import enrich_single_session, run_enrichment, run_refresh
+from copilot_session_tools.sources import SessionIdentityConflictError, discover_source_presets
 from copilot_session_tools.utils import (
     build_block_metadata,
     build_root_agent_markers,
@@ -109,6 +111,27 @@ def create_app(
             return normalized[:max_length] + "..."
         return normalized
 
+    def _csrf_token() -> str:
+        token = session.get("csrf_token")
+        if not token:
+            token = secrets.token_urlsafe(32)
+            session["csrf_token"] = token
+        return token
+
+    def _require_csrf() -> None:
+        if app.config.get("TESTING"):
+            return
+        expected = session.get("csrf_token", "")
+        provided = request.form.get("csrf_token", "")
+        if not expected or not secrets.compare_digest(expected, provided):
+            from flask import abort
+
+            abort(400, "Invalid CSRF token.")
+
+    @app.errorhandler(SessionIdentityConflictError)
+    def handle_session_identity_conflict(error: SessionIdentityConflictError):
+        return make_response(str(error), 409)
+
     @app.route("/")
     def index():
         """List sessions, with optional search, workspace, repository filtering, and pagination."""
@@ -117,6 +140,7 @@ def create_app(
         selected_workspaces = request.args.getlist("workspace")
         selected_repositories = request.args.getlist("repository")
         selected_editions = request.args.getlist("edition")
+        selected_source = request.args.get("source", "").strip()
         selected_search_types = request.args.getlist("search_in")
         sort_by = request.args.get("sort", "relevance")  # 'relevance' or 'date'
 
@@ -145,6 +169,69 @@ def create_app(
                     search_content_set = resolve_search_content_set(include=validated)
                 except Exception:
                     search_content_set = None  # Fallback to defaults on error
+
+        sources = db.list_sources()
+        all_sessions = db.list_sessions()
+        sessions_by_id = {item["session_id"]: item for item in all_sessions}
+        application_filters: list[dict] = []
+        application_sessions: dict[str, list[dict]] = {}
+
+        edition_names: set[str] = set()
+        for item in all_sessions:
+            edition_name = item.get("vscode_edition")
+            if isinstance(edition_name, str) and edition_name != "cli":
+                edition_names.add(edition_name)
+        for edition_name in sorted(edition_names):
+            matching = [item for item in all_sessions if item.get("vscode_edition") == edition_name]
+            application_sessions[edition_name] = matching
+            application_filters.append(
+                {
+                    "key": edition_name,
+                    "label": edition_name,
+                    "css_class": edition_name,
+                    "count": len(matching),
+                }
+            )
+
+        for source in sources:
+            key = "cli" if source.is_default else f"source:{source.source_id}"
+            source_session_ids = db.get_source_session_ids(source)
+            matching = []
+            for session_id in source_session_ids:
+                if session_id not in sessions_by_id:
+                    continue
+                item = dict(sessions_by_id[session_id])
+                item["source_id"] = source.source_id
+                item["source_name"] = source.name
+                matching.append(item)
+            application_sessions[key] = matching
+            application_filters.append(
+                {
+                    "key": key,
+                    "label": "cli" if source.is_default else source.name,
+                    "css_class": "cli",
+                    "count": len(matching),
+                }
+            )
+
+        if selected_source and not selected_editions:
+            legacy_source = db.get_source(selected_source)
+            if legacy_source is not None:
+                selected_editions = ["cli" if legacy_source.is_default else f"source:{legacy_source.source_id}"]
+                selected_source = ""
+
+        if selected_editions:
+            selected_session_map: dict[str, dict] = {}
+            for application_key in selected_editions:
+                for item in application_sessions.get(application_key, []):
+                    selected_session_map.setdefault(item["session_id"], item)
+            candidate_sessions = sorted(
+                selected_session_map.values(),
+                key=lambda item: item.get("updated_at") or "",
+                reverse=True,
+            )
+        else:
+            candidate_sessions = all_sessions
 
         if query:
             # Use FTS search with sort option
@@ -180,13 +267,12 @@ def create_app(
                     search_snippets[sid].append(snippet)
 
             # Get full session info for matching sessions, preserving search result order
-            all_sessions = db.list_sessions()
-            session_map = {s["session_id"]: s for s in all_sessions}
+            session_map = {s["session_id"]: s for s in candidate_sessions}
             sessions = [session_map[sid] for sid in session_ids if sid in session_map]
         else:
             # No query: list_sessions() returns sessions sorted by date (newest first)
             # Relevance sorting doesn't apply without a search query
-            sessions = db.list_sessions()
+            sessions = candidate_sessions
 
         # Apply workspace filter if selected
         if selected_workspaces:
@@ -198,10 +284,6 @@ def create_app(
             selected_repository_set = set(selected_repositories)
             sessions = [s for s in sessions if selected_repository_set.intersection(set(s.get("repository_urls") or [s.get("repository_url")]))]
 
-        # Apply edition filter if selected
-        if selected_editions:
-            sessions = [s for s in sessions if s.get("vscode_edition") in selected_editions]
-
         # Calculate pagination
         total_sessions = len(sessions)
         total_pages = max(1, (total_sessions + per_page - 1) // per_page)  # Ceiling division
@@ -210,9 +292,9 @@ def create_app(
         end_idx = start_idx + per_page
         paginated_sessions = sessions[start_idx:end_idx]
 
-        workspaces = db.get_workspaces()
-        repositories = db.get_repositories()
-        stats = db.get_stats()
+        workspaces = db.get_workspaces(all_sessions)
+        repositories = db.get_repositories(all_sessions)
+        stats = db.get_stats(all_sessions)
         cst_tables_exist = db.has_cst_tables()
         version_refresh_count = db.count_sessions_needing_version_refresh(__version__) if cst_tables_exist else 0
 
@@ -229,12 +311,14 @@ def create_app(
             selected_workspaces=selected_workspaces,
             selected_repositories=selected_repositories,
             selected_editions=selected_editions,
+            application_filters=application_filters,
             selected_search_types=selected_search_types,
             refresh_result=refresh_result,
             sort_by=sort_by,
             has_cst_tables=cst_tables_exist,
             version_refresh_count=version_refresh_count,
             upgrade_available=app.config.get("UPGRADE_AVAILABLE"),
+            csrf_token=_csrf_token(),
             # Pagination context
             page=page,
             per_page=per_page,
@@ -396,11 +480,88 @@ def create_app(
 
         return redirect(url_for("index"))
 
+    @app.route("/sources")
+    def sources():
+        """Manage named Copilot CLI application sources."""
+        db = Database(app.config["DB_PATH"], chronicle_db_path=app.config["CHRONICLE_DB_PATH"])
+        return render_template(
+            "sources.html",
+            title=app.config["ARCHIVE_TITLE"],
+            sources=db.list_sources(),
+            presets=discover_source_presets(),
+            csrf_token=_csrf_token(),
+        )
+
+    @app.route("/sources/add", methods=["POST"])
+    def add_source():
+        _require_csrf()
+        db = Database(app.config["DB_PATH"], chronicle_db_path=app.config["CHRONICLE_DB_PATH"])
+        base_dir = request.form.get("base_dir", "").strip()
+        preset_id = request.form.get("preset", "").strip()
+        if bool(base_dir) == bool(preset_id):
+            flash("Specify exactly one base directory or detected preset.", "error")
+            return redirect(url_for("sources"))
+        if preset_id:
+            presets = {preset.preset_id: preset for preset in discover_source_presets()}
+            preset = presets.get(preset_id)
+            if preset is None:
+                flash(f"Source preset is not available: {preset_id}", "error")
+                return redirect(url_for("sources"))
+            base_dir = str(preset.base_dir)
+        try:
+            source = db.add_source(request.form.get("name", ""), base_dir)
+        except ValueError as exc:
+            flash(str(exc), "error")
+        else:
+            flash(f"Added source {source.name}.", "success")
+        return redirect(url_for("sources"))
+
+    @app.route("/sources/<source_id>/rename", methods=["POST"])
+    def rename_source(source_id: str):
+        _require_csrf()
+        db = Database(app.config["DB_PATH"], chronicle_db_path=app.config["CHRONICLE_DB_PATH"])
+        try:
+            source = db.rename_source(source_id, request.form.get("name", ""))
+        except ValueError as exc:
+            flash(str(exc), "error")
+        else:
+            flash(f"Renamed source to {source.name}.", "success")
+        return redirect(url_for("sources"))
+
+    @app.route("/sources/<source_id>/toggle", methods=["POST"])
+    def toggle_source(source_id: str):
+        _require_csrf()
+        db = Database(app.config["DB_PATH"], chronicle_db_path=app.config["CHRONICLE_DB_PATH"])
+        enabled = request.form.get("enabled") == "true"
+        try:
+            source = db.set_source_enabled(source_id, enabled=enabled)
+        except ValueError as exc:
+            flash(str(exc), "error")
+        else:
+            flash(f"{'Enabled' if source.enabled else 'Disabled'} source {source.name}.", "success")
+        return redirect(url_for("sources"))
+
     @app.route("/enrich/<session_id>", methods=["POST"])
     def enrich_session(session_id: str):
         """Enrich a single CLI session by parsing its events.jsonl file."""
         enrich_db = Database(app.config["DB_PATH"], chronicle_db_path=app.config["CHRONICLE_DB_PATH"])
-        error = enrich_single_session(enrich_db, session_id)
+        try:
+            existing = enrich_db.get_session(session_id)
+        except SessionIdentityConflictError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("session_view", session_id=session_id))
+        if existing is None:
+            flash("Session not found.", "error")
+            return redirect(url_for("session_view", session_id=session_id))
+        source = enrich_db.get_source(existing.source_id) if existing.source_id else None
+        if source is None or not source.enabled:
+            flash("The session source is unavailable or disabled.", "error")
+            return redirect(url_for("session_view", session_id=session_id))
+        error = enrich_single_session(
+            enrich_db,
+            existing.native_session_id or existing.session_id,
+            source=source,
+        )
         if error:
             flash(error, "error")
             return redirect(url_for("session_view", session_id=session_id))

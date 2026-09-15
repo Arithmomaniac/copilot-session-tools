@@ -351,6 +351,8 @@ def get_cst_session(conn: sqlite3.Connection, session_id: str) -> ChatSession | 
         repository_url=safe_get("repository_url"),
         root_agent_intervals=root_agent_intervals,
         context_entries=context_entries,
+        source_id=safe_get("source_id"),
+        native_session_id=safe_get("native_session_id"),
     )
 
 
@@ -444,14 +446,41 @@ def get_builtin_refs(conn: sqlite3.Connection, session_id: str) -> list[dict]:
         return []
 
 
-def list_builtin_sessions(conn: sqlite3.Connection, limit: int = 100, offset: int = 0) -> list[dict]:
+def list_builtin_sessions(
+    conn: sqlite3.Connection,
+    limit: int = 100,
+    offset: int = 0,
+    *,
+    nonempty_only: bool = False,
+) -> list[dict]:
     """List sessions from the Chronicle sessions table.
 
     Expects Chronicle to be ATTACHed as ``chronicle`` schema.
     """
     try:
+        nonempty_filter = (
+            """
+            WHERE EXISTS (
+                SELECT 1
+                FROM chronicle.turns t
+                WHERE t.session_id = chronicle.sessions.id
+                  AND (
+                      (t.user_message IS NOT NULL AND t.user_message != '')
+                      OR (t.assistant_response IS NOT NULL AND t.assistant_response != '')
+                  )
+            )
+        """
+            if nonempty_only
+            else ""
+        )
         rows = conn.execute(
-            "SELECT id, cwd, repository, branch, summary, created_at, updated_at FROM chronicle.sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            f"""
+            SELECT id, cwd, repository, branch, summary, created_at, updated_at
+            FROM chronicle.sessions
+            {nonempty_filter}
+            ORDER BY updated_at DESC
+            LIMIT ? OFFSET ?
+            """,  # noqa: S608
             (limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -676,6 +705,9 @@ def list_sessions(
                 s.repository_url,
                 s.type as session_type,
                 s.source_format,
+                s.source_id,
+                s.native_session_id,
+                src.name AS source_name,
                 COUNT(CASE WHEN m.parent_message_id IS NULL THEN 1 END) as message_count,
                 MAX(m.timestamp) as last_message_at,
                 (SELECT content FROM cst_messages m2
@@ -683,6 +715,7 @@ def list_sessions(
                  ORDER BY m2.message_index LIMIT 1) as first_user_prompt
             FROM cst_sessions s
             LEFT JOIN cst_messages m ON s.session_id = m.session_id
+            LEFT JOIN cst_sources src ON src.source_id = s.source_id
         """
         conditions = []
         params: list = []
@@ -705,7 +738,11 @@ def list_sessions(
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
 
-        query += " GROUP BY s.session_id HAVING COUNT(CASE WHEN m.parent_message_id IS NULL THEN 1 END) > 0 ORDER BY last_message_at DESC, s.created_at DESC"
+        query += " GROUP BY s.session_id HAVING COUNT(CASE WHEN m.parent_message_id IS NULL THEN 1 END) > 0 ORDER BY COALESCE(s.updated_at, MAX(m.timestamp), s.created_at) DESC"
+        candidate_limit = offset + limit if limit is not None else None
+        if candidate_limit is not None:
+            query += " LIMIT ?"
+            params.append(candidate_limit)
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -723,7 +760,11 @@ def list_sessions(
 
     # 2. Read from Chronicle sessions (cli type only) if Chronicle is available
     if has_chronicle and (session_type is None or session_type == "cli"):
-        builtin = list_builtin_sessions(conn, limit=10000)
+        builtin = list_builtin_sessions(
+            conn,
+            limit=offset + limit if limit is not None else 10000,
+            nonempty_only=True,
+        )
         # Batch-query turn counts for unenriched sessions
         unenriched_sids = [row["id"] for row in builtin if row["id"] not in results]
         turn_counts: dict[str, int] = {}
@@ -767,7 +808,7 @@ def list_sessions(
 
     # Sort by updated_at desc, apply limit/offset
     sorted_results = sorted(results.values(), key=lambda x: x.get("updated_at") or "", reverse=True)
-    effective_limit = limit if limit else len(sorted_results)
+    effective_limit = limit if limit is not None else len(sorted_results)
     return sorted_results[offset : offset + effective_limit]
 
 

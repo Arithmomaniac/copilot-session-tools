@@ -90,6 +90,27 @@ If new turns arrive after enrichment (e.g., you continued a conversation), the w
 
 **VS Code sessions** (Stable and Insiders) are imported during `scan` from workspace storage. They're always enriched on import since there's no built-in tier for VS Code.
 
+### Additional Copilot CLI application sources
+
+One archive can include sessions from multiple applications that embed Copilot CLI. Each named source points to that application's Copilot base directory, which contains its read-only `session-store.db` and session event files.
+
+```bash
+# See locally detected presets. scout is shown only when ~/.scout/copilot exists.
+copilot-session-tools sources presets
+
+# Register a detected Scout installation explicitly, or provide any compatible base directory.
+copilot-session-tools sources add --preset scout --name scout
+copilot-session-tools sources add --name another-app --base-dir /path/to/copilot
+
+# Manage the per-archive registry shared by the CLI and web viewer.
+copilot-session-tools sources list
+copilot-session-tools sources rename another-app --name renamed-app
+copilot-session-tools sources disable renamed-app
+copilot-session-tools sources enable renamed-app
+```
+
+Source identifiers are case-insensitive, stored and rendered in lowercase, and cannot use reserved identifiers such as `cli`, `stable`, `insider`, or `custom`. A session UUID is its global identity across applications, so identical copies collapse to one session and keep the same URL. If different session data is found under the same UUID, the operation fails with an identity-conflict error instead of silently choosing one copy. Disabling a source stops live reads and enrichment while retaining content already stored in the archive.
+
 ## Searching
 
 ```bash
@@ -99,6 +120,7 @@ copilot-session-tools search "React hooks" --full
 # Filter by role, workspace, edition, date
 copilot-session-tools search "role:user workspace:my-project error" --full
 copilot-session-tools search "edition:cli start_date:2026-01-01 deploy" --full
+copilot-session-tools search "deploy" --source scout --full
 
 # Search only tool invocations or file changes
 copilot-session-tools search "git" --tools-only
@@ -125,6 +147,10 @@ copilot-session-tools scan --full
 
 # Enrich a single CLI session
 copilot-session-tools enrich <session-id>
+copilot-session-tools enrich <native-session-id> --source scout
+
+# Scan only one named CLI source (skips VS Code for this invocation)
+copilot-session-tools scan --source scout
 ```
 
 The web viewer's **Scan Now** button on unenriched sessions triggers single-session enrichment without a full scan.
@@ -160,7 +186,8 @@ copilot-session-tools web --db custom.db     # custom database
 
 Features:
 - **Full-text search** with keyword highlighting
-- **Edition badges** (CLI, VS Code Stable, VS Code Insiders) with counts
+- **Application filters** with separate counts for `cli`, each named source such as `scout`, and VS Code editions
+- **Named CLI sources** managed from the Sources page, including a conditional `scout` preset
 - **Repository and workspace filtering**
 - **Enrichment status** — see which sessions have full detail vs. basic turns
 - **Copy Markdown** toolbar — select message range, include/exclude diffs, tool inputs, thinking
