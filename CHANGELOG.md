@@ -7,6 +7,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Named CLI sources**: A single archive can persist multiple uniquely named Copilot CLI application roots and manage them from both the CLI and web viewer.
+- **Scout preset**: `scout` is offered as an explicit source preset when its local `.scout/copilot` directory is detected.
+- **Source filtering and provenance**: Session lists, search, detail pages, Markdown, HTML, and JSON exports identify the originating CLI application.
+
+### Changed
+
+- **Database**: Schema v15 adds a durable source registry while preserving native session UUIDs as global identities. Source identifiers are case-insensitive, stored and rendered lowercase, and rejected when reserved. Identical copies from multiple applications collapse to one session; conflicting data under the same UUID now raises an explicit integrity error.
+- **Refresh and fallback**: Chronicle discovery, JSONL enrichment, staleness checks, targeted enrichment, and orphan cleanup now operate per source. Disabled or unavailable sources retain archived content.
+- **Application filters**: The `cli` button now includes only the built-in Copilot CLI source. Every added source gets its own lowercase button, such as `scout`, while VS Code editions remain separate.
+
 ## [0.17.1] - 2026-06-30
 
 ### Fixed

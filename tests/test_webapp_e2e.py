@@ -290,7 +290,7 @@ class TestRefreshRebuildE2E:
         from copilot_session_tools.scanner import scan_chat_sessions
 
         storage_paths = [(str(tmp_path / "workspaceStorage"), "stable")]
-        for session in scan_chat_sessions(storage_paths):
+        for session in scan_chat_sessions(storage_paths, include_cli=False):
             db.add_session(session)
 
         return {

@@ -12,8 +12,10 @@ read-only when needed for enrichment discovery and unenriched fallback.
 
 import contextlib
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import ClassVar
 
@@ -32,6 +34,15 @@ from .db_storage import (  # noqa: F401 — re-exported for backward compatibili
 from .scanner import (
     ChatMessage,
     ChatSession,
+)
+from .sources import (
+    DEFAULT_SOURCE_ID,
+    CopilotSource,
+    SessionIdentityConflictError,
+    canonicalize_base_dir,
+    new_source_id,
+    normalize_source_name,
+    validate_chronicle,
 )
 
 
@@ -97,6 +108,118 @@ class Database:
                 self.chronicle_db_path = candidate
 
         self._ensure_schema()
+        self._configure_default_source()
+
+    def _configure_default_source(self) -> None:
+        """Keep the default source path aligned with Chronicle auto-detection."""
+        base_dir = self.chronicle_db_path.parent if self.chronicle_db_path is not None else Path.home() / ".copilot"
+        base_dir_key = os.path.normcase(str(base_dir.resolve(strict=False)))
+        with self._get_connection() as conn:
+            conflicting = conn.execute(
+                "SELECT name FROM cst_sources WHERE base_dir_key = ? AND source_id != ?",
+                (base_dir_key, DEFAULT_SOURCE_ID),
+            ).fetchone()
+            if conflicting is not None:
+                raise ValueError(f"Default CLI source path is already registered as source '{conflicting['name']}'.")
+            conn.execute(
+                "UPDATE cst_sources SET base_dir = ?, base_dir_key = ? WHERE source_id = ?",
+                (str(base_dir), base_dir_key, DEFAULT_SOURCE_ID),
+            )
+
+    @staticmethod
+    def _source_from_row(row: sqlite3.Row) -> CopilotSource:
+        return CopilotSource(
+            source_id=row["source_id"],
+            name=row["name"],
+            base_dir=Path(row["base_dir"]),
+            enabled=bool(row["enabled"]),
+            is_default=bool(row["is_default"]),
+        )
+
+    def list_sources(self, *, enabled_only: bool = False) -> list[CopilotSource]:
+        """List persisted Copilot CLI sources."""
+        query = "SELECT * FROM cst_sources"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY is_default DESC, name_key"
+        with self._get_connection() as conn:
+            return [self._source_from_row(row) for row in conn.execute(query).fetchall()]
+
+    def get_source(self, name_or_id: str) -> CopilotSource | None:
+        """Resolve a source by immutable ID or case-insensitive display name."""
+        key = name_or_id.strip().casefold()
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM cst_sources WHERE source_id = ? COLLATE NOCASE OR name_key = ?",
+                (key, key),
+            ).fetchone()
+        return self._source_from_row(row) if row else None
+
+    def add_source(self, name: str, base_dir: str | Path) -> CopilotSource:
+        """Validate and persist a named Copilot CLI source."""
+        display_name, name_key = normalize_source_name(name)
+        if self.get_source(display_name):
+            raise ValueError(f"A source named '{display_name}' already exists.")
+        resolved_dir, base_dir_key = canonicalize_base_dir(base_dir)
+        validate_chronicle(resolved_dir)
+        source_id = new_source_id()
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO cst_sources
+                        (source_id, name, name_key, base_dir, base_dir_key, enabled, is_default)
+                    VALUES (?, ?, ?, ?, ?, 1, 0)
+                    """,
+                    (source_id, display_name, name_key, str(resolved_dir), base_dir_key),
+                )
+        except sqlite3.IntegrityError as exc:
+            existing = self.get_source(display_name)
+            if existing:
+                raise ValueError(f"A source named '{display_name}' already exists.") from exc
+            raise ValueError(f"Copilot base directory is already registered: {resolved_dir}") from exc
+        source = self.get_source(source_id)
+        if source is None:
+            raise RuntimeError("Source registration did not persist.")
+        return source
+
+    def rename_source(self, name_or_id: str, new_name: str) -> CopilotSource:
+        """Rename a source without changing its stable identifier."""
+        source = self.get_source(name_or_id)
+        if source is None:
+            raise ValueError(f"Source not found: {name_or_id}")
+        if source.is_default:
+            raise ValueError("The default Copilot CLI source cannot be renamed.")
+        display_name, name_key = normalize_source_name(new_name)
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE cst_sources SET name = ?, name_key = ? WHERE source_id = ?",
+                    (display_name, name_key, source.source_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"A source named '{display_name}' already exists.") from exc
+        renamed = self.get_source(source.source_id)
+        if renamed is None:
+            raise RuntimeError("Source rename did not persist.")
+        return renamed
+
+    def set_source_enabled(self, name_or_id: str, *, enabled: bool) -> CopilotSource:
+        """Enable or disable a custom source while retaining archived content."""
+        source = self.get_source(name_or_id)
+        if source is None:
+            raise ValueError(f"Source not found: {name_or_id}")
+        if source.is_default and not enabled:
+            raise ValueError("The default Copilot CLI source cannot be disabled.")
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE cst_sources SET enabled = ? WHERE source_id = ?",
+                (int(enabled), source.source_id),
+            )
+        updated = self.get_source(source.source_id)
+        if updated is None:
+            raise RuntimeError("Source state change did not persist.")
+        return updated
 
     @contextmanager
     def _get_connection(self):
@@ -126,7 +249,7 @@ class Database:
         """Check whether the Chronicle DB file exists on disk."""
         return self.chronicle_db_path is not None and self.chronicle_db_path.is_file()
 
-    def _attach_chronicle(self, conn: sqlite3.Connection) -> bool:
+    def _attach_chronicle(self, conn: sqlite3.Connection, source: CopilotSource | None = None) -> bool:
         """ATTACH the Chronicle DB as ``chronicle`` schema on *conn*.
 
         Uses a read-only URI to prevent accidental writes to Chronicle.
@@ -134,7 +257,8 @@ class Database:
         Returns True if attached successfully (or already attached),
         False if Chronicle DB is unavailable or attachment failed.
         """
-        if not self._has_chronicle():
+        chronicle_path = source.chronicle_db_path if source is not None else self.chronicle_db_path
+        if chronicle_path is None or not chronicle_path.is_file():
             return False
         # Check if chronicle is already attached (e.g., inside batch_connection)
         try:
@@ -144,10 +268,8 @@ class Database:
         except sqlite3.Error:
             pass
         try:
-            # ATTACH read-only via URI to prevent accidental writes.
-            # Forward slashes required for URI paths on all platforms.
-            chronicle_posix = str(self.chronicle_db_path).replace("\\", "/")
-            conn.execute(f"ATTACH DATABASE 'file:{chronicle_posix}?mode=ro' AS chronicle")
+            chronicle_uri = f"{chronicle_path.resolve().as_uri()}?mode=ro"
+            conn.execute("ATTACH DATABASE ? AS chronicle", (chronicle_uri,))
             return True
         except sqlite3.Error:
             return False
@@ -181,6 +303,23 @@ class Database:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 5000")
         attached = self._attach_chronicle(conn)
+        try:
+            yield conn, attached
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _get_source_connection(self, source: CopilotSource):
+        """Get an archive connection with one source's Chronicle DB attached."""
+        conn = sqlite3.connect(str(self.db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        attached = self._attach_chronicle(conn, source)
         try:
             yield conn, attached
             conn.commit()
@@ -249,10 +388,106 @@ class Database:
         with self._get_connection() as conn:
             return db_storage.has_cst_tables(conn)
 
-    def discover_sessions_needing_enrichment(self) -> list[dict]:
+    def discover_sessions_needing_enrichment(self, source: CopilotSource | None = None) -> list[dict]:
         """Find CLI sessions needing enrichment by comparing Chronicle turns vs cst_messages."""
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            return db_storage.discover_sessions_needing_enrichment(conn, has_chronicle=has_chronicle)
+        resolved_source = source or self.get_source(DEFAULT_SOURCE_ID)
+        if resolved_source is None:
+            return []
+        with self._get_source_connection(resolved_source) as (conn, has_chronicle):
+            rows = db_storage.discover_sessions_needing_enrichment(
+                conn,
+                has_chronicle=has_chronicle,
+                source_id=resolved_source.source_id,
+            )
+        for row in rows:
+            row["native_session_id"] = row["session_id"]
+            row["source_id"] = resolved_source.source_id
+            row["source_base_dir"] = str(resolved_source.base_dir)
+        return rows
+
+    @staticmethod
+    def _session_content(session: ChatSession) -> dict:
+        """Return session data excluding storage location and source provenance."""
+        content = asdict(session)
+        for key in (
+            "source_id",
+            "source_name",
+            "native_session_id",
+            "source_file",
+            "source_file_mtime",
+            "source_file_size",
+        ):
+            content.pop(key, None)
+
+        def strip_derived(value):
+            if isinstance(value, dict):
+                return {key: strip_derived(item) for key, item in value.items() if key != "cached_markdown"}
+            if isinstance(value, list):
+                return [strip_derived(item) for item in value]
+            return value
+
+        return strip_derived(content)
+
+    @staticmethod
+    def _raise_identity_conflict(session_id: str, sources: list[str]) -> None:
+        source_list = ", ".join(sources)
+        raise SessionIdentityConflictError(f"Session UUID {session_id} contains conflicting data in sources: {source_list}.")
+
+    def _check_existing_session_identity(
+        self,
+        conn: sqlite3.Connection,
+        session: ChatSession,
+    ) -> bool:
+        """Return True for an identical cross-source duplicate, or raise on conflict."""
+        from .db_retrieval import get_cst_session
+
+        existing = get_cst_session(conn, session.session_id)
+        if existing is None or existing.source_id == session.source_id:
+            return False
+        if self._session_content(existing) != self._session_content(session):
+            existing_source = self.get_source(existing.source_id) if existing.source_id else None
+            incoming_source = self.get_source(session.source_id) if session.source_id else None
+            self._raise_identity_conflict(
+                session.session_id,
+                [
+                    existing_source.name if existing_source else existing.source_id or "unknown",
+                    incoming_source.name if incoming_source else session.source_id or "unknown",
+                ],
+            )
+        return True
+
+    def _resolve_builtin_session(
+        self,
+        session_id: str,
+        *,
+        preferred_source: CopilotSource | None = None,
+    ) -> tuple[CopilotSource, ChatSession] | None:
+        """Resolve one UUID across enabled source stores and reject conflicting copies."""
+        from .db_retrieval import get_builtin_session_as_chat_session
+
+        candidates: list[tuple[CopilotSource, ChatSession]] = []
+        for source in self.list_sources(enabled_only=True):
+            with self._get_source_connection(source) as (conn, has_chronicle):
+                if not has_chronicle:
+                    continue
+                session = get_builtin_session_as_chat_session(conn, session_id)
+            if session is None:
+                continue
+            session.native_session_id = session_id
+            session.source_id = source.source_id
+            session.source_name = source.name
+            candidates.append((source, session))
+
+        if not candidates:
+            return None
+        expected = self._session_content(candidates[0][1])
+        if any(self._session_content(session) != expected for _, session in candidates[1:]):
+            self._raise_identity_conflict(session_id, [source.name for source, _ in candidates])
+        if preferred_source is not None:
+            for candidate in candidates:
+                if candidate[0].source_id == preferred_source.source_id:
+                    return candidate
+        return candidates[0]
 
     def add_session(self, session: ChatSession) -> bool:
         """Add a chat session to the database.
@@ -260,6 +495,8 @@ class Database:
         Returns True if the session was added, False if it already exists.
         """
         with self._get_connection() as conn:
+            if self._check_existing_session_identity(conn, session):
+                return False
             return db_storage.add_session(conn, session)
 
     def add_sessions_batch(self, sessions: list[ChatSession]) -> tuple[int, int]:
@@ -269,7 +506,15 @@ class Database:
             Tuple of (added_count, skipped_count).
         """
         with self._get_connection() as conn:
-            return db_storage.add_sessions_batch(conn, sessions)
+            accepted: list[ChatSession] = []
+            skipped = 0
+            for session in sessions:
+                if self._check_existing_session_identity(conn, session):
+                    skipped += 1
+                else:
+                    accepted.append(session)
+            added, existing = db_storage.add_sessions_batch(conn, accepted)
+            return added, skipped + existing
 
     def _add_session_impl(self, cursor, session: ChatSession):
         """Delegate to db_storage.add_session_impl."""
@@ -278,6 +523,8 @@ class Database:
     def update_session(self, session: ChatSession):
         """Update an existing session or add it if it doesn't exist."""
         with self._get_connection() as conn:
+            if self._check_existing_session_identity(conn, session):
+                return
             db_storage.update_session(conn, session)
 
     def update_sessions_batch(self, sessions: list[ChatSession]) -> int:
@@ -287,7 +534,8 @@ class Database:
             Number of sessions updated.
         """
         with self._get_connection() as conn:
-            return db_storage.update_sessions_batch(conn, sessions)
+            accepted = [session for session in sessions if not self._check_existing_session_identity(conn, session)]
+            return db_storage.update_sessions_batch(conn, accepted)
 
     def get_sessions_needing_reparse(self, current_parser_version: int) -> list[dict]:
         """Find cst_sessions with parser_version < current_parser_version."""
@@ -353,20 +601,24 @@ class Database:
         Returns:
             ChatSession if found, None otherwise.
         """
-        from .db_retrieval import get_builtin_session_as_chat_session, get_cst_session
+        from .db_retrieval import get_cst_session
 
         # Try enriched path first
         if self.has_cst_tables():
             with self._get_connection() as conn:
                 session = get_cst_session(conn, session_id)
                 if session:
+                    if session.source_id:
+                        source = self.get_source(session.source_id)
+                        session.source_name = source.name if source else None
+                    if session.type == "cli":
+                        self._resolve_builtin_session(session_id)
                     return session
 
-        # Fall back to Chronicle (unenriched)
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            if has_chronicle:
-                return get_builtin_session_as_chat_session(conn, session_id)
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
             return None
+        return resolved[1]
 
     def get_all_session_ids(self) -> list[str]:
         """Get all session IDs from cst_sessions.
@@ -426,6 +678,7 @@ class Database:
         limit: int | None = None,
         offset: int = 0,
         session_type: str | None = None,
+        source_name: str | None = None,
     ) -> list[dict]:
         """List sessions from cst_* tables and (optionally) Chronicle.
 
@@ -436,23 +689,113 @@ class Database:
             limit: Maximum number of sessions to return.
             offset: Number of sessions to skip.
             session_type: Optional filter: 'cli', 'vscode', etc.
+            source_name: Optional named Copilot application source.
 
         Returns:
             List of session info dictionaries sorted by updated_at descending.
         """
         from .db_retrieval import list_sessions
 
+        selected_source = self.get_source(source_name) if source_name else None
+        if source_name and selected_source is None:
+            raise ValueError(f"Source not found: {source_name}")
+        fetch_limit = None if selected_source is not None or limit is None else offset + limit
+        all_cst_ids = set(self.get_all_session_ids()) if fetch_limit is not None else set()
         has_cst = self.has_cst_tables()
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            return list_sessions(
+        with self._get_connection() as conn:
+            combined = list_sessions(
                 conn,
                 has_cst=has_cst,
-                has_chronicle=has_chronicle,
+                has_chronicle=False,
                 workspace_name=workspace_name,
-                limit=limit,
-                offset=offset,
+                limit=fetch_limit,
+                offset=0,
                 session_type=session_type,
             )
+        canonical_by_id = {row["session_id"]: row for row in combined}
+        if selected_source is not None:
+            combined = [row for row in combined if row.get("source_id") == selected_source.source_id]
+
+        by_id = {row["session_id"]: row for row in combined}
+        seen_builtin: dict[str, CopilotSource] = {}
+        candidate_sources = [selected_source] if selected_source else self.list_sources(enabled_only=True)
+        for source in candidate_sources:
+            if source is None or not source.enabled:
+                continue
+            with self._get_source_connection(source) as (conn, has_chronicle):
+                if not has_chronicle:
+                    continue
+                builtin = list_sessions(
+                    conn,
+                    has_cst=False,
+                    has_chronicle=True,
+                    workspace_name=None,
+                    limit=fetch_limit,
+                    offset=0,
+                    session_type=session_type,
+                )
+            for row in builtin:
+                native_id = row["session_id"]
+                if native_id in seen_builtin:
+                    self._resolve_builtin_session(native_id)
+                    continue
+                seen_builtin[native_id] = source
+                canonical = canonical_by_id.get(native_id)
+                if canonical is not None:
+                    if selected_source is not None and native_id not in by_id:
+                        self._resolve_builtin_session(native_id)
+                        selected_row = dict(canonical)
+                        selected_row["source_id"] = selected_source.source_id
+                        selected_row["source_name"] = selected_source.name
+                        by_id[native_id] = selected_row
+                    continue
+                if native_id in all_cst_ids:
+                    continue
+                row["native_session_id"] = native_id
+                row["source_id"] = source.source_id
+                row["source_name"] = source.name
+                by_id[native_id] = row
+        rows = sorted(
+            by_id.values(),
+            key=lambda row: row.get("updated_at") or row.get("last_message_at") or row.get("created_at") or "",
+            reverse=True,
+        )
+        effective_limit = limit if limit is not None else len(rows)
+        return rows[offset : offset + effective_limit]
+
+    def get_source_session_ids(self, source: CopilotSource) -> set[str]:
+        """Return non-empty Chronicle session IDs belonging to one source."""
+        with self._get_connection() as conn:
+            session_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT session_id FROM cst_sessions WHERE source_id = ? AND type = 'cli'",
+                    (source.source_id,),
+                )
+            }
+        with self._get_source_connection(source) as (conn, has_chronicle):
+            if not has_chronicle:
+                return session_ids
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT s.id
+                    FROM chronicle.sessions s
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM chronicle.turns t
+                        WHERE t.session_id = s.id
+                          AND (
+                              (t.user_message IS NOT NULL AND t.user_message != '')
+                              OR (t.assistant_response IS NOT NULL AND t.assistant_response != '')
+                          )
+                    )
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return session_ids
+        session_ids.update(row[0] for row in rows)
+        return session_ids
 
     def search(
         self,
@@ -469,6 +812,7 @@ class Database:
         repository: str | list[str] | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        source_name: str | None = None,
     ) -> list[dict]:
         """Search messages using full-text search with field filtering.
 
@@ -525,12 +869,13 @@ class Database:
         if not search_content_set:
             return []
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            return execute_search(
+        fetch_limit = 10000 if source_name else limit + skip
+        with self._get_connection() as conn:
+            results = execute_search(
                 conn,
                 query,
-                limit=limit,
-                skip=skip,
+                limit=fetch_limit,
+                skip=0,
                 role=role,
                 search_content_set=search_content_set,
                 session_title=session_title,
@@ -538,30 +883,239 @@ class Database:
                 repository=repository,
                 start_date=start_date,
                 end_date=end_date,
-                has_chronicle=has_chronicle,
+                has_chronicle=False,
             )
+        session_ids = {row["session_id"] for row in results}
+        source_metadata: dict[str, tuple[str | None, str | None, str | None]] = {}
+        if session_ids:
+            placeholders = ",".join("?" for _ in session_ids)
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT s.session_id, s.source_id, s.native_session_id, src.name
+                    FROM cst_sessions s
+                    LEFT JOIN cst_sources src ON src.source_id = s.source_id
+                    WHERE s.session_id IN ({placeholders})
+                    """,  # noqa: S608
+                    tuple(session_ids),
+                ).fetchall()
+            source_metadata = {row["session_id"]: (row["source_id"], row["native_session_id"], row["name"]) for row in rows}
+        for row in results:
+            source_id, native_id, name = source_metadata.get(row["session_id"], (None, None, None))
+            row["source_id"] = source_id
+            row["native_session_id"] = native_id
+            row["source_name"] = name
 
-    def get_workspaces(self) -> list[dict]:
+        selected_source = self.get_source(source_name) if source_name else None
+        if source_name and selected_source is None:
+            raise ValueError(f"Source not found: {source_name}")
+        canonical_results = {row["session_id"]: row for row in results}
+        if selected_source:
+            results = [row for row in results if row.get("source_id") == selected_source.source_id]
+
+        from .db_search import _search_builtin_index
+
+        parsed = parse_search_query(query)
+        candidate_sources = [selected_source] if selected_source else self.list_sources(enabled_only=True)
+        result_ids = {row["session_id"] for row in results}
+        seen_builtin: set[str] = set()
+        if parsed.fts_query and "messages" in search_content_set:
+            enriched_ids = set(self.get_all_session_ids())
+            for source in candidate_sources:
+                if source is None or not source.enabled:
+                    continue
+                with self._get_source_connection(source) as (conn, attached):
+                    if not attached:
+                        continue
+                    builtin = _search_builtin_index(conn, parsed.fts_query, fetch_limit)
+                for native_id, row in builtin.items():
+                    if native_id in seen_builtin:
+                        self._resolve_builtin_session(native_id)
+                        continue
+                    seen_builtin.add(native_id)
+                    if native_id in result_ids:
+                        continue
+                    canonical = canonical_results.get(native_id)
+                    if selected_source is not None and canonical is not None:
+                        self._resolve_builtin_session(native_id)
+                        selected_row = dict(canonical)
+                        selected_row["source_id"] = selected_source.source_id
+                        selected_row["source_name"] = selected_source.name
+                        results.append(selected_row)
+                        result_ids.add(native_id)
+                        continue
+                    if native_id in enriched_ids:
+                        continue
+                    row["session_id"] = native_id
+                    row["native_session_id"] = native_id
+                    row["source_id"] = source.source_id
+                    row["source_name"] = source.name
+                    results.append(row)
+                    result_ids.add(native_id)
+
+        return results[skip : skip + limit]
+
+    def _get_unenriched_builtin_summaries(self) -> list[dict]:
+        enriched_ids = set(self.get_all_session_ids())
+        seen_ids = set(enriched_ids)
+        summaries = []
+        for source in self.list_sources(enabled_only=True):
+            with self._get_source_connection(source) as (conn, has_chronicle):
+                if not has_chronicle:
+                    continue
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            s.id,
+                            s.repository,
+                            s.cwd,
+                            s.created_at,
+                            s.updated_at,
+                            SUM(
+                                (t.user_message IS NOT NULL AND t.user_message != '')
+                                + (t.assistant_response IS NOT NULL AND t.assistant_response != '')
+                            ) AS message_count
+                        FROM chronicle.sessions s
+                        LEFT JOIN chronicle.turns t ON t.session_id = s.id
+                        GROUP BY s.id
+                        HAVING message_count > 0
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    continue
+            for row in rows:
+                session_id = row["id"]
+                if session_id in seen_ids:
+                    if session_id not in enriched_ids:
+                        self._resolve_builtin_session(session_id)
+                    continue
+                seen_ids.add(session_id)
+                summaries.append(dict(row))
+        return summaries
+
+    @staticmethod
+    def _workspaces_from_sessions(sessions: list[dict]) -> list[dict]:
+        workspaces: dict[tuple[str, str | None], dict] = {}
+        for session in sessions:
+            names = session.get("workspace_names") or [session.get("workspace_name")]
+            paths = session.get("workspace_paths") or [session.get("workspace_path")]
+            for index, name in enumerate(names):
+                if not name:
+                    continue
+                path = paths[index] if index < len(paths) else session.get("workspace_path")
+                key = (name, path)
+                item = workspaces.setdefault(
+                    key,
+                    {"workspace_name": name, "workspace_path": path, "session_count": 0, "last_activity": None},
+                )
+                item["session_count"] += 1
+                item["last_activity"] = max(item["last_activity"] or "", session.get("updated_at") or session.get("created_at") or "")
+        return sorted(workspaces.values(), key=lambda item: (-item["session_count"], item["workspace_name"]))
+
+    def get_workspaces(self, sessions: list[dict] | None = None) -> list[dict]:
         """Get all unique workspaces."""
+        if sessions is not None:
+            return self._workspaces_from_sessions(sessions)
+
         from .db_retrieval import get_workspaces
 
         with self._get_connection() as conn:
-            return get_workspaces(conn)
+            workspaces = {(row["workspace_name"], row["workspace_path"]): row for row in get_workspaces(conn)}
+        for session in self._get_unenriched_builtin_summaries():
+            name = session.get("repository")
+            if not name:
+                continue
+            key = (name, session.get("cwd"))
+            item = workspaces.setdefault(
+                key,
+                {
+                    "workspace_name": name,
+                    "workspace_path": session.get("cwd"),
+                    "session_count": 0,
+                    "last_activity": None,
+                },
+            )
+            item["session_count"] += 1
+            item["last_activity"] = max(item["last_activity"] or "", session.get("updated_at") or session.get("created_at") or "")
+        return sorted(workspaces.values(), key=lambda item: (-item["session_count"], item["workspace_name"]))
 
-    def get_repositories(self) -> list[dict]:
+    @staticmethod
+    def _repositories_from_sessions(sessions: list[dict]) -> list[dict]:
+        repositories: dict[str, dict] = {}
+        for session in sessions:
+            for repository in session.get("repository_urls") or [session.get("repository_url")]:
+                if not repository:
+                    continue
+                item = repositories.setdefault(
+                    repository,
+                    {"repository_url": repository, "session_count": 0, "last_activity": None},
+                )
+                item["session_count"] += 1
+                item["last_activity"] = max(item["last_activity"] or "", session.get("updated_at") or session.get("created_at") or "")
+        return sorted(repositories.values(), key=lambda item: (-item["session_count"], item["repository_url"]))
+
+    def get_repositories(self, sessions: list[dict] | None = None) -> list[dict]:
         """Get all unique repositories."""
+        if sessions is not None:
+            return self._repositories_from_sessions(sessions)
+
         from .db_retrieval import get_repositories
 
         with self._get_connection() as conn:
-            return get_repositories(conn)
+            repositories = {row["repository_url"]: row for row in get_repositories(conn)}
+        for session in self._get_unenriched_builtin_summaries():
+            repository = session.get("repository")
+            if not repository:
+                continue
+            item = repositories.setdefault(
+                repository,
+                {"repository_url": repository, "session_count": 0, "last_activity": None},
+            )
+            item["session_count"] += 1
+            item["last_activity"] = max(item["last_activity"] or "", session.get("updated_at") or session.get("created_at") or "")
+        return sorted(repositories.values(), key=lambda item: (-item["session_count"], item["repository_url"]))
 
-    def get_stats(self) -> dict:
+    @staticmethod
+    def _stats_from_sessions(sessions: list[dict]) -> dict:
+        editions: dict[str, int] = {}
+        for session in sessions:
+            edition = session.get("vscode_edition") or "unknown"
+            editions[edition] = editions.get(edition, 0) + 1
+        return {
+            "session_count": len(sessions),
+            "message_count": sum(session.get("message_count") or 0 for session in sessions),
+            "workspace_count": len({name for session in sessions for name in (session.get("workspace_names") or [session.get("workspace_name")]) if name}),
+            "editions": editions,
+            "enriched_count": sum(bool(session.get("is_enriched")) for session in sessions),
+            "unenriched_count": sum(not bool(session.get("is_enriched")) for session in sessions),
+        }
+
+    def get_stats(self, sessions: list[dict] | None = None) -> dict:
         """Get database statistics."""
+        if sessions is not None:
+            return self._stats_from_sessions(sessions)
+
         from .db_retrieval import get_stats
 
         has_cst = self.has_cst_tables()
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            return get_stats(conn, has_cst=has_cst, has_chronicle=has_chronicle)
+        with self._get_connection() as conn:
+            stats = get_stats(conn, has_cst=has_cst, has_chronicle=False)
+            workspace_names = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT workspace_name FROM cst_sessions WHERE workspace_name IS NOT NULL",
+                )
+            }
+        for session in self._get_unenriched_builtin_summaries():
+            stats["session_count"] += 1
+            stats["message_count"] += session.get("message_count") or 0
+            stats["unenriched_count"] += 1
+            stats["editions"]["cli"] = stats["editions"].get("cli", 0) + 1
+            if session.get("repository"):
+                workspace_names.add(session["repository"])
+        stats["workspace_count"] = len(workspace_names)
+        return stats
 
     def export_json(self) -> str:
         """Export all data as JSON."""
@@ -577,6 +1131,9 @@ class Database:
                         "created_at": session.created_at,
                         "updated_at": session.updated_at,
                         "vscode_edition": session.vscode_edition,
+                        "source_id": session.source_id,
+                        "source_name": session.source_name,
+                        "native_session_id": session.native_session_id,
                         "messages": [
                             {
                                 "role": msg.role,
@@ -600,7 +1157,11 @@ class Database:
         """Read a session from the Chronicle sessions table."""
         from .db_retrieval import get_builtin_session
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
+            return None
+        source = resolved[0]
+        with self._get_source_connection(source) as (conn, has_chronicle):
             if has_chronicle:
                 return get_builtin_session(conn, session_id)
             return None
@@ -609,7 +1170,11 @@ class Database:
         """Read turns from the Chronicle turns table for a session."""
         from .db_retrieval import get_builtin_turns
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
+            return []
+        source = resolved[0]
+        with self._get_source_connection(source) as (conn, has_chronicle):
             if has_chronicle:
                 return get_builtin_turns(conn, session_id)
             return []
@@ -618,7 +1183,11 @@ class Database:
         """Read checkpoints from the Chronicle checkpoints table."""
         from .db_retrieval import get_builtin_checkpoints
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
+            return []
+        source = resolved[0]
+        with self._get_source_connection(source) as (conn, has_chronicle):
             if has_chronicle:
                 return get_builtin_checkpoints(conn, session_id)
             return []
@@ -627,7 +1196,11 @@ class Database:
         """Read file references from the Chronicle session_files table."""
         from .db_retrieval import get_builtin_files
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
+            return []
+        source = resolved[0]
+        with self._get_source_connection(source) as (conn, has_chronicle):
             if has_chronicle:
                 return get_builtin_files(conn, session_id)
             return []
@@ -636,7 +1209,11 @@ class Database:
         """Read refs from the Chronicle session_refs table."""
         from .db_retrieval import get_builtin_refs
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
+            return []
+        source = resolved[0]
+        with self._get_source_connection(source) as (conn, has_chronicle):
             if has_chronicle:
                 return get_builtin_refs(conn, session_id)
             return []
@@ -645,32 +1222,82 @@ class Database:
         """List sessions from the Chronicle sessions table."""
         from .db_retrieval import list_builtin_sessions
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            if has_chronicle:
-                return list_builtin_sessions(conn, limit=limit, offset=offset)
-            return []
+        rows: list[dict] = []
+        by_id: dict[str, dict] = {}
+        for source in self.list_sources(enabled_only=True):
+            with self._get_source_connection(source) as (conn, has_chronicle):
+                if not has_chronicle:
+                    continue
+                source_rows = list_builtin_sessions(conn, limit=10000, offset=0)
+            for row in source_rows:
+                native_id = row["id"]
+                if native_id in by_id:
+                    self._resolve_builtin_session(native_id)
+                    continue
+                row["native_session_id"] = native_id
+                row["source_id"] = source.source_id
+                row["source_name"] = source.name
+                by_id[native_id] = row
+        rows.extend(by_id.values())
+        rows.sort(key=lambda row: row.get("updated_at") or "", reverse=True)
+        return rows[offset : offset + limit]
 
     def count_builtin_turns(self, session_id: str) -> int:
         """Count turns for a session in the Chronicle turns table."""
         from .db_retrieval import count_builtin_turns
 
-        with self._get_chronicle_connection() as (conn, has_chronicle):
+        resolved = self._resolve_builtin_session(session_id)
+        if resolved is None:
+            return 0
+        source = resolved[0]
+        with self._get_source_connection(source) as (conn, has_chronicle):
             if has_chronicle:
                 return count_builtin_turns(conn, session_id)
             return 0
 
-    def enrich_session(self, session: ChatSession) -> None:
+    def enrich_session(self, session: ChatSession, source: CopilotSource | None = None) -> None:
         """Write/update cst_* tables for a parsed ChatSession.
 
         Idempotent: deletes existing data for this session_id, then inserts fresh.
         """
+        resolved_source = source
+        if resolved_source is None and session.source_id:
+            resolved_source = self.get_source(session.source_id)
+        if resolved_source is None:
+            resolved_source = self.get_source(DEFAULT_SOURCE_ID)
+        if resolved_source is not None:
+            session.type = "cli"
+            session.vscode_edition = "cli"
+            session.source_id = resolved_source.source_id
+            if session.native_session_id is None:
+                session.native_session_id = session.session_id
+            session.session_id = session.native_session_id
         with self._get_connection() as conn:
-            # Attach Chronicle (best-effort, idempotent) so the turn count can be
-            # recorded on cst_sessions for like-for-like incremental staleness checks.
-            self._attach_chronicle(conn)
+            if self._check_existing_session_identity(conn, session):
+                return
+            if resolved_source is not None:
+                self._attach_chronicle(conn, resolved_source)
             db_storage.enrich_session(conn, session)
 
-    def cleanup_orphaned_cst_sessions(self) -> list[str]:
+    def cleanup_orphaned_cst_sessions(self, source: CopilotSource | None = None) -> list[str]:
         """Find and delete cst_sessions whose session_id doesn't exist in the Chronicle sessions table."""
-        with self._get_chronicle_connection() as (conn, has_chronicle):
-            return db_storage.cleanup_orphaned_cst_sessions(conn, has_chronicle=has_chronicle)
+        if source is not None:
+            with self._get_source_connection(source) as (conn, has_chronicle):
+                return db_storage.cleanup_orphaned_cst_sessions(
+                    conn,
+                    has_chronicle=has_chronicle,
+                    source_id=source.source_id,
+                )
+
+        live_session_ids: set[str] = set()
+        sources = self.list_sources()
+        for candidate in sources:
+            with self._get_source_connection(candidate) as (conn, has_chronicle):
+                if not has_chronicle:
+                    return []
+                live_session_ids.update(row[0] for row in conn.execute("SELECT id FROM chronicle.sessions"))
+        with self.batch_connection() as conn:
+            return db_storage.cleanup_orphaned_cst_sessions(
+                conn,
+                live_session_ids=live_session_ids,
+            )

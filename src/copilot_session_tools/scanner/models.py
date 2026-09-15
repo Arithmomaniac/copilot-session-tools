@@ -176,6 +176,9 @@ class ChatSession:
     source_format: str | None = None  # 'cli', 'json', 'jsonl', 'vscdb'
     root_agent_intervals: list[RootAgentInterval] = field(default_factory=list)
     context_entries: list[SessionContextEntry] = field(default_factory=list)
+    source_id: str | None = None
+    native_session_id: str | None = None
+    source_name: str | None = None
 
     def effective_context_entries(self) -> list[SessionContextEntry]:
         """Return context entries, falling back to the legacy scalar metadata."""

@@ -31,13 +31,23 @@ from .db_schema import (
 from .markdown_exporter import message_to_markdown
 from .scanner import ChatSession
 
-CST_SCHEMA_VERSION = 12
-CHRONICLE_SCHEMA_VERSION = 4
+CST_SCHEMA_VERSION = 15
+CHRONICLE_SCHEMA_VERSION = 6
 
 
 CST_SCHEMA = """
 CREATE TABLE IF NOT EXISTS cst_schema_version (
     version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cst_sources (
+    source_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL UNIQUE,
+    base_dir TEXT NOT NULL,
+    base_dir_key TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    is_default INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS cst_sessions (
@@ -58,9 +68,10 @@ CREATE TABLE IF NOT EXISTS cst_sessions (
     parser_version INTEGER NOT NULL DEFAULT 1,
     source_format TEXT,
     enrichment_version TEXT,
-    builtin_turns INTEGER
+    builtin_turns INTEGER,
+    source_id TEXT REFERENCES cst_sources(source_id),
+    native_session_id TEXT
 );
-
 CREATE TABLE IF NOT EXISTS cst_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES cst_sessions(session_id) ON DELETE CASCADE,
@@ -297,6 +308,43 @@ END;
 # ---------------------------------------------------------------------------
 
 
+def _finalize_source_schema(cursor: sqlite3.Cursor) -> None:
+    from .sources import DEFAULT_SOURCE_ID, DEFAULT_SOURCE_NAME
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO cst_sources
+            (source_id, name, name_key, base_dir, base_dir_key, enabled, is_default)
+        VALUES (?, ?, ?, '', '', 1, 1)
+        """,
+        (DEFAULT_SOURCE_ID, DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_NAME.casefold()),
+    )
+    cursor.execute(
+        "UPDATE cst_sources SET name = name_key WHERE source_id != ?",
+        (DEFAULT_SOURCE_ID,),
+    )
+    cursor.execute(
+        "UPDATE cst_sources SET name = ?, name_key = ? WHERE source_id = ?",
+        (DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_ID),
+    )
+    cursor.execute(
+        """
+        UPDATE cst_sessions
+        SET source_id = ?, native_session_id = session_id
+        WHERE type = 'cli' AND source_id IS NULL
+        """,
+        (DEFAULT_SOURCE_ID,),
+    )
+    cursor.execute("DROP INDEX IF EXISTS idx_cst_sessions_source_native")
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cst_sessions_native
+        ON cst_sessions(native_session_id)
+        WHERE native_session_id IS NOT NULL
+        """
+    )
+
+
 def _drop_and_recreate_cst_tables(conn: sqlite3.Connection) -> None:
     """Drop and recreate all cst_* tables for major schema migrations.
 
@@ -329,6 +377,7 @@ def _drop_and_recreate_cst_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(CST_FTS_SCHEMA)
     # Insert fresh schema version
     cursor.execute("INSERT INTO cst_schema_version (version) VALUES (?)", (CST_SCHEMA_VERSION,))
+    _finalize_source_schema(cursor)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -363,6 +412,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         # before replaying the idempotent schema script against upgraded DBs.
         with contextlib.suppress(sqlite3.OperationalError):
             cursor.execute("ALTER TABLE cst_messages ADD COLUMN source_event_id TEXT")
+    if has_schema and current_version < 13:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute("ALTER TABLE cst_sessions ADD COLUMN source_id TEXT REFERENCES cst_sources(source_id)")
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute("ALTER TABLE cst_sessions ADD COLUMN native_session_id TEXT")
 
     # Create cst_* tables (safe: either fresh DB or already at v6+)
     conn.executescript(CST_SCHEMA)
@@ -410,10 +464,49 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 12:
             with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute("ALTER TABLE cst_sessions ADD COLUMN builtin_turns INTEGER")
+        if current_version < 14:
+            qualified_rows = cursor.execute(
+                """
+                SELECT session_id, native_session_id
+                FROM cst_sessions
+                WHERE native_session_id IS NOT NULL
+                  AND session_id != native_session_id
+                """
+            ).fetchall()
+            session_columns = [row[1] for row in cursor.execute("PRAGMA table_info(cst_sessions)").fetchall()]
+            copied_columns = [column for column in session_columns if column != "session_id"]
+            quoted_columns = ", ".join(f'"{column}"' for column in copied_columns)
+            for old_id, native_id in qualified_rows:
+                if cursor.execute(
+                    "SELECT 1 FROM cst_sessions WHERE session_id = ?",
+                    (native_id,),
+                ).fetchone():
+                    raise sqlite3.IntegrityError(f"Cannot migrate qualified session {old_id}: UUID {native_id} already exists.")
+                cursor.execute(
+                    f"""
+                    INSERT INTO cst_sessions ("session_id", {quoted_columns})
+                    SELECT ?, {quoted_columns}
+                    FROM cst_sessions
+                    WHERE session_id = ?
+                    """,  # noqa: S608
+                    (native_id, old_id),
+                )
+                for table in (
+                    "cst_messages",
+                    "cst_root_agent_intervals",
+                    "cst_session_contexts",
+                ):
+                    cursor.execute(
+                        f"UPDATE {table} SET session_id = ? WHERE session_id = ?",  # noqa: S608
+                        (native_id, old_id),
+                    )
+                cursor.execute("DELETE FROM cst_sessions WHERE session_id = ?", (old_id,))
         cursor.execute(
             "UPDATE cst_schema_version SET version = ?",
             (CST_SCHEMA_VERSION,),
         )
+
+    _finalize_source_schema(cursor)
 
 
 def check_builtin_schema_version(conn: sqlite3.Connection) -> None:
@@ -451,7 +544,12 @@ def has_cst_tables(conn: sqlite3.Connection, *, unenriched_only: bool = False) -
         return False
 
 
-def discover_sessions_needing_enrichment(conn: sqlite3.Connection, *, has_chronicle: bool = False) -> list[dict]:
+def discover_sessions_needing_enrichment(
+    conn: sqlite3.Connection,
+    *,
+    has_chronicle: bool = False,
+    source_id: str,
+) -> list[dict]:
     """Find CLI sessions needing enrichment by comparing Chronicle turn counts.
 
     When Chronicle is ATTACHed (``has_chronicle=True``), compares the current
@@ -481,7 +579,8 @@ def discover_sessions_needing_enrichment(conn: sqlite3.Connection, *, has_chroni
         cst_exists = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cst_sessions'").fetchone()[0] > 0
 
         if cst_exists:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT
                     s.id as session_id,
                     COUNT(DISTINCT t.turn_index) as builtin_turns,
@@ -490,12 +589,15 @@ def discover_sessions_needing_enrichment(conn: sqlite3.Connection, *, has_chroni
                          ELSE 'stale' END as status
                 FROM chronicle.sessions s
                 LEFT JOIN chronicle.turns t ON s.id = t.session_id
-                LEFT JOIN cst_sessions cs ON s.id = cs.session_id
+                LEFT JOIN cst_sessions cs
+                  ON s.id = cs.native_session_id AND cs.source_id = ?
                 GROUP BY s.id
                 HAVING cs.session_id IS NULL
                     OR cs.builtin_turns IS NULL
                     OR cs.builtin_turns != COUNT(DISTINCT t.turn_index)
-            """).fetchall()
+            """,
+                (source_id,),
+            ).fetchall()
         else:
             rows = conn.execute("""
                 SELECT
@@ -802,7 +904,13 @@ def get_sessions_needing_reparse(conn: sqlite3.Connection, current_parser_versio
     if cursor.fetchone() is None:
         return []
     rows = conn.execute(
-        "SELECT session_id, type, source_format, source_file, parser_version FROM cst_sessions WHERE parser_version < ?",
+        """
+        SELECT s.session_id, s.native_session_id, s.source_id, s.type, s.source_format,
+               s.source_file, s.parser_version, src.base_dir AS source_base_dir
+        FROM cst_sessions s
+        LEFT JOIN cst_sources src ON src.source_id = s.source_id
+        WHERE s.parser_version < ?
+        """,
         (current_parser_version,),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -851,7 +959,12 @@ def get_sessions_needing_version_refresh(conn: sqlite3.Connection, current_versi
     if cursor.fetchone() is None:
         return []
     rows = conn.execute(
-        "SELECT session_id, type, source_format, source_file, enrichment_version FROM cst_sessions",
+        """
+        SELECT s.session_id, s.native_session_id, s.source_id, s.type, s.source_format,
+               s.source_file, s.enrichment_version, src.base_dir AS source_base_dir
+        FROM cst_sessions s
+        LEFT JOIN cst_sources src ON src.source_id = s.source_id
+        """,
     ).fetchall()
     return [dict(r) for r in rows if r["enrichment_version"] is None or Version(r["enrichment_version"]) < current]
 
@@ -973,7 +1086,7 @@ def get_all_file_metadata(conn: sqlite3.Connection) -> dict[str, tuple[float, in
 # ---------------------------------------------------------------------------
 
 
-def _builtin_turn_count(conn: sqlite3.Connection, session_id: str) -> int | None:
+def _builtin_turn_count(conn: sqlite3.Connection, native_session_id: str) -> int | None:
     """Return the current Chronicle turn count for *session_id*, or None.
 
     Returns None when Chronicle is not ATTACHed (so the caller stores NULL and
@@ -984,7 +1097,7 @@ def _builtin_turn_count(conn: sqlite3.Connection, session_id: str) -> int | None
     try:
         row = conn.execute(
             "SELECT COUNT(DISTINCT turn_index) FROM chronicle.turns WHERE session_id = ?",
-            (session_id,),
+            (native_session_id,),
         ).fetchone()
     except sqlite3.OperationalError:
         return None  # Chronicle not attached
@@ -1002,7 +1115,7 @@ def enrich_session(conn: sqlite3.Connection, session: ChatSession) -> None:
 
     # Record the Chronicle turn count so incremental scans can detect growth
     # with a like-for-like comparison (see discover_sessions_needing_enrichment).
-    builtin_turns = _builtin_turn_count(conn, session.session_id)
+    builtin_turns = _builtin_turn_count(conn, session.native_session_id or session.session_id)
 
     cursor = conn.cursor()
 
@@ -1096,7 +1209,13 @@ def enrich_session(conn: sqlite3.Connection, session: ChatSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cleanup_orphaned_cst_sessions(conn: sqlite3.Connection, *, has_chronicle: bool = False) -> list[str]:
+def cleanup_orphaned_cst_sessions(
+    conn: sqlite3.Connection,
+    *,
+    has_chronicle: bool = False,
+    source_id: str | None = None,
+    live_session_ids: set[str] | None = None,
+) -> list[str]:
     """Find and delete cst_sessions whose session_id doesn't exist in Chronicle's sessions table.
 
     Only targets CLI sessions (source_type='cli') since VS Code sessions
@@ -1108,23 +1227,27 @@ def cleanup_orphaned_cst_sessions(conn: sqlite3.Connection, *, has_chronicle: bo
     Returns:
         List of deleted session_ids.
     """
-    if not has_chronicle:
+    if live_session_ids is not None:
+        rows = conn.execute(
+            "SELECT session_id, native_session_id FROM cst_sessions WHERE type = 'cli'",
+        ).fetchall()
+        orphaned_ids = [row[0] for row in rows if (row[1] or row[0]) not in live_session_ids]
+    elif not has_chronicle or source_id is None:
         return []
-
-    cursor = conn.cursor()
-
-    # Find orphaned CLI sessions
-    rows = cursor.execute(
-        """
-        SELECT cs.session_id FROM cst_sessions cs
-        WHERE cs.type = 'cli'
-        AND cs.session_id NOT IN (SELECT id FROM chronicle.sessions)
-        """,
-    ).fetchall()
-
-    orphaned_ids = [row[0] for row in rows]
+    else:
+        rows = conn.execute(
+            """
+            SELECT cs.session_id FROM cst_sessions cs
+            WHERE cs.type = 'cli'
+            AND cs.source_id = ?
+            AND cs.native_session_id NOT IN (SELECT id FROM chronicle.sessions)
+            """,
+            (source_id,),
+        ).fetchall()
+        orphaned_ids = [row[0] for row in rows]
 
     # Delete orphaned sessions and all related data
+    cursor = conn.cursor()
     for session_id in orphaned_ids:
         _delete_session_data(cursor, session_id)
         cursor.execute("DELETE FROM cst_sessions WHERE session_id = ?", (session_id,))

@@ -1,11 +1,13 @@
 """Tests for the webapp module."""
 
+import sqlite3
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from copilot_session_tools import ChatMessage, ChatSession, ContentBlock, Database, RootAgentInterval, SessionContextEntry
+from copilot_session_tools.sources import SessionIdentityConflictError
 from copilot_session_tools.utils import (
     extract_filename as _extract_filename,
 )
@@ -67,6 +69,22 @@ def client(app):
     return app.test_client()
 
 
+def test_index_materializes_sessions_once(app, client, monkeypatch):
+    original = Database.list_sessions
+    calls = []
+
+    def tracked_list_sessions(self, *args, **kwargs):
+        calls.append(kwargs.get("source_name"))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "list_sessions", tracked_list_sessions)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert calls == [None]
+
+
 class TestMarkdownToHtml:
     """Tests for the markdown to HTML converter."""
 
@@ -74,6 +92,53 @@ class TestMarkdownToHtml:
         """Test converting plain text."""
         result = _markdown_to_html("Hello, world!")
         assert "Hello, world!" in result
+
+
+class TestSourceManagement:
+    def test_add_rename_disable_and_enable_source(self, client, temp_db, tmp_path):
+        source_dir = tmp_path / "scout"
+        source_dir.mkdir()
+        with sqlite3.connect(source_dir / "session-store.db") as conn:
+            conn.executescript(
+                """
+                CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                CREATE TABLE turns (session_id TEXT, turn_index INTEGER);
+                """
+            )
+
+        added = client.post(
+            "/sources/add",
+            data={"name": "Scout", "base_dir": str(source_dir)},
+            follow_redirects=True,
+        )
+        database = Database(temp_db)
+        scout = database.get_source("Scout")
+        assert added.status_code == 200
+        assert b"scout" in added.data
+        assert scout is not None
+
+        renamed = client.post(
+            f"/sources/{scout.source_id}/rename",
+            data={"name": "Microsoft Scout"},
+            follow_redirects=True,
+        )
+        disabled = client.post(
+            f"/sources/{scout.source_id}/toggle",
+            data={"enabled": "false"},
+            follow_redirects=True,
+        )
+        enabled = client.post(
+            f"/sources/{scout.source_id}/toggle",
+            data={"enabled": "true"},
+            follow_redirects=True,
+        )
+
+        assert renamed.status_code == 200
+        assert b"microsoft scout" in renamed.data
+        assert disabled.status_code == 200
+        assert b"disabled" in disabled.data
+        assert enabled.status_code == 200
+        assert b"enabled" in enabled.data
 
     def test_inline_code(self):
         """Test converting inline code."""
@@ -238,6 +303,80 @@ class TestWebappRoutes:
         response = client.get("/")
         assert response.status_code == 200
         assert b"Test Archive" in response.data
+
+    def test_identity_conflict_returns_explicit_error(self, client, monkeypatch):
+        def raise_conflict(*args, **kwargs):
+            raise SessionIdentityConflictError("Session UUID duplicate contains conflicting data.")
+
+        monkeypatch.setattr(Database, "list_sessions", raise_conflict)
+
+        response = client.get("/")
+
+        assert response.status_code == 409
+        assert b"Session UUID duplicate contains conflicting data." in response.data
+
+    def test_application_buttons_separate_cli_from_added_source(
+        self,
+        client,
+        temp_db,
+        tmp_path,
+    ):
+        database = Database(temp_db)
+        source_dir = tmp_path / "scout"
+        source_dir.mkdir()
+        with sqlite3.connect(source_dir / "session-store.db") as conn:
+            conn.executescript(
+                """
+                CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                CREATE TABLE turns (
+                    session_id TEXT,
+                    turn_index INTEGER,
+                    user_message TEXT,
+                    assistant_response TEXT
+                );
+                """
+            )
+        scout = database.add_source("Scout", source_dir)
+        database.add_session(
+            ChatSession(
+                session_id="11111111-1111-1111-1111-111111111111",
+                native_session_id="11111111-1111-1111-1111-111111111111",
+                source_id="default-cli",
+                workspace_name=None,
+                workspace_path=None,
+                messages=[ChatMessage(role="user", content="default cli content")],
+                custom_title="Default CLI session",
+                type="cli",
+                vscode_edition="cli",
+            )
+        )
+        database.add_session(
+            ChatSession(
+                session_id="22222222-2222-2222-2222-222222222222",
+                native_session_id="22222222-2222-2222-2222-222222222222",
+                source_id=scout.source_id,
+                workspace_name=None,
+                workspace_path=None,
+                messages=[ChatMessage(role="user", content="scout content")],
+                custom_title="Scout session",
+                type="cli",
+                vscode_edition="cli",
+            )
+        )
+
+        unfiltered = client.get("/")
+        cli_only = client.get("/?edition=cli")
+        scout_only = client.get(f"/?edition=source:{scout.source_id}")
+
+        assert f'value="source:{scout.source_id}"'.encode() in unfiltered.data
+        assert b">scout</span>" in unfiltered.data
+        assert b"Default CLI session" in cli_only.data
+        assert b"Scout session" not in cli_only.data
+        assert b"Scout session" in scout_only.data
+        assert b"Default CLI session" not in scout_only.data
+        scout_card = scout_only.data.split(b"Scout session", 1)[1].split(b"</li>", 1)[0]
+        assert b'class="edition-badge cli">scout</span>' in scout_card
+        assert b'class="edition-badge cli">cli</span>' not in scout_card
 
     def test_index_shows_sessions(self, client):
         """Test the index shows sessions."""

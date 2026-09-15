@@ -2758,7 +2758,11 @@ input:checked + .toggle-switch::after {
                 {% endif %}
             </h1>
             <span class="toolbar-meta">{{ message_count }} msgs</span>
+            {% if session.vscode_edition == 'cli' %}
+            <span class="edition-badge cli">{{ session.source_name or 'cli' }}</span>
+            {% else %}
             <span class="edition-badge {{ session.vscode_edition }}">{{ session.vscode_edition }}</span>
+            {% endif %}
             {% if is_enriched %}
             <div class="toolbar-export">
                 <input type="number" id="range-start" min="1" max="{{ message_count }}" placeholder="1" title="Start message" x-model="rangeStart" class="range-input">
@@ -2876,6 +2880,8 @@ input:checked + .toggle-switch::after {
             {%- endif %}
             {% if session.created_at %}
             <span>Created: {{ session.created_at | format_timestamp }}</span>
+            {% endif %}{% if session.source_name %}
+            <span>Application: {{ session.source_name }}</span>
             {% endif %}
             <small>ID: <code>{{ session.session_id }}</code></small>
             {% if session.source_file %}

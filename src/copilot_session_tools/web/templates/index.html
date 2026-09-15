@@ -901,14 +901,15 @@ footer a {
     <header>
         <div class="container">
             <h1>{{ title }}{% if app_version %} <span style="font-size: 0.5em; opacity: 0.6;">v{{ app_version }}</span>{% endif %}</h1>
+            <div><a href="/sources">Manage Copilot CLI sources</a></div>
             <div class="stats">
                 {{ stats.session_count }} sessions &bull; 
                 {{ stats.message_count }} messages &bull; 
                 {{ stats.workspace_count }} workspaces
-                {% if stats.editions %}
+                {% if application_filters %}
                     &bull;
-                    {% for edition, count in stats.editions.items() %}
-                        <span class="edition-badge {{ edition }}">{{ edition }}: {{ count }}</span>
+                    {% for application in application_filters %}
+                        <span class="edition-badge {{ application.css_class }}">{{ application.label }}: {{ application.count }}</span>
                     {% endfor %}
                 {% endif %}
             </div>
@@ -946,7 +947,7 @@ footer a {
             {% endfor %}
         </form>
         <div class="search-help">
-            💡 Tips: Use <code>"exact phrase"</code> for exact match, <code>role:user</code> or <code>role:assistant</code> to filter by role, <code>workspace:name</code> to filter by workspace, <code>edition:cli</code> to filter by edition, <code>repo:name</code> to filter by repository, <code>start_date:2024-01-01</code> and <code>end_date:2024-12-31</code> to filter by date
+            💡 Tips: Use <code>"exact phrase"</code> for exact match, <code>role:user</code> or <code>role:assistant</code> to filter by role, <code>workspace:name</code> to filter by workspace, <code>repo:name</code> to filter by repository, <code>start_date:2024-01-01</code> and <code>end_date:2024-12-31</code> to filter by date
         </div>
 
         {% if refresh_result %}
@@ -991,16 +992,16 @@ footer a {
         {% endif %}
 
         <div class="filters-section">
-            <!-- Edition filter buttons -->
-            {% if stats.editions %}
+            <!-- Application filter buttons -->
+            {% if application_filters %}
             <div class="edition-filters" id="edition-filters">
-                <label>Edition:</label>
-                {% for edition_name, count in stats.editions.items() %}
-                <label class="edition-filter-btn{% if edition_name in (selected_editions or []) %} checked{% endif %}">
-                    <input type="checkbox" name="edition" value="{{ edition_name }}"
-                        {% if edition_name in (selected_editions or []) %}checked{% endif %}>
-                    <span class="edition-badge {{ edition_name }}">{{ edition_name }}</span>
-                    <span class="edition-count">({{ count }})</span>
+                <label>Application:</label>
+                {% for application in application_filters %}
+                <label class="edition-filter-btn{% if application.key in (selected_editions or []) %} checked{% endif %}">
+                    <input type="checkbox" name="edition" value="{{ application.key }}"
+                        {% if application.key in (selected_editions or []) %}checked{% endif %}>
+                    <span class="edition-badge {{ application.css_class }}">{{ application.label }}</span>
+                    <span class="edition-count">({{ application.count }})</span>
                 </label>
                 {% endfor %}
             </div>
@@ -1109,7 +1110,11 @@ footer a {
                     {% if session.created_at %}
                     <span>Created: {{ session.created_at | format_timestamp }}</span>
                     {% endif %}
+                    {% if session.vscode_edition == 'cli' %}
+                    <span class="edition-badge cli">{{ session.source_name or 'cli' }}</span>
+                    {% else %}
                     <span class="edition-badge {{ session.vscode_edition }}">{{ session.vscode_edition }}</span>
+                    {% endif %}
                     {% if session.is_enriched %}
                     <span class="enrichment-badge enriched">✓ Enriched</span>
                     {% else %}
@@ -1357,6 +1362,7 @@ footer a {
                     
                     // Get selected editions
                     url.searchParams.delete('edition');
+                    url.searchParams.delete('source');
                     if (editionFilters) {
                         const editionCheckboxes = editionFilters.querySelectorAll('input[type="checkbox"]:checked');
                         editionCheckboxes.forEach(cb => url.searchParams.append('edition', cb.value));

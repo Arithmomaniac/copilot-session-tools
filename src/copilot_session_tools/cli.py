@@ -35,6 +35,7 @@ from copilot_session_tools.refresh import (
     run_enrichment,
     run_refresh,
 )
+from copilot_session_tools.sources import DEFAULT_SOURCE_ID, discover_source_presets
 
 # On Windows, reconfigure stdout/stderr to UTF-8 when piped to prevent
 # Rich from falling back to cp1252 which can't handle Unicode output
@@ -86,6 +87,8 @@ app = typer.Typer(
     help="Create a searchable archive of VS Code GitHub Copilot chats.",
     no_args_is_help=True,
 )
+sources_app = typer.Typer(help="Manage named Copilot CLI application sources.")
+app.add_typer(sources_app, name="sources")
 console = Console()
 
 # Module-level state set by the app callback
@@ -241,6 +244,13 @@ def scan(
             min=1,
         ),
     ] = None,
+    source: Annotated[
+        str | None,
+        typer.Option(
+            "--source",
+            help="Scan one named Copilot CLI source and skip VS Code scanning.",
+        ),
+    ] = None,
 ):
     """Scan for and import Copilot chat sessions, enriching them into the built-in store.
 
@@ -264,8 +274,20 @@ def scan(
     db.parent.mkdir(parents=True, exist_ok=True)
     database = _make_database(db)
 
-    # Determine storage paths
-    if storage_path:
+    selected_source = None
+    if source:
+        if storage_path or edition != "both":
+            console.print("[red]Error: --source cannot be combined with --storage-path or --edition.[/red]")
+            raise typer.Exit(1)
+        selected_source = database.get_source(source)
+        if selected_source is None:
+            console.print(f"[red]Error: Source not found: {source}[/red]")
+            raise typer.Exit(1)
+        if not selected_source.enabled:
+            console.print(f"[red]Error: Source is disabled: {selected_source.name}[/red]")
+            raise typer.Exit(1)
+        paths = []
+    elif storage_path:
         paths = [(str(p), "custom") for p in storage_path]
     else:
         all_paths = get_vscode_storage_paths()
@@ -318,7 +340,12 @@ def scan(
 
     # --- CLI session enrichment from Chronicle's built-in session store ---
     console.print("\n[cyan]Enriching CLI sessions...[/cyan]")
-    enrich_result = run_enrichment(database, on_progress=progress_cb, workers=n_workers)
+    enrich_result = run_enrichment(
+        database,
+        on_progress=progress_cb,
+        workers=n_workers,
+        sources=[selected_source] if selected_source else None,
+    )
 
     console.print(f"  Enriched: {enrich_result.enriched} sessions")
     if enrich_result.reparsed:
@@ -348,6 +375,10 @@ def enrich(
             help="Path to SQLite database file.",
         ),
     ] = _DEFAULT_DB,
+    source: Annotated[
+        str | None,
+        typer.Option("--source", help="Named Copilot CLI source for a native session ID."),
+    ] = None,
 ):
     """Enrich a single CLI session from its events.jsonl file.
 
@@ -357,13 +388,112 @@ def enrich(
     """
     _ensure_db_exists(db)
     database = _make_database(db)
+    selected_source = database.get_source(source) if source else database.get_source(DEFAULT_SOURCE_ID)
+    if source and selected_source is None:
+        console.print(f"[red]Error: Source not found: {source}[/red]")
+        raise typer.Exit(1)
 
-    error = enrich_single_session(database, session_id)
+    error = enrich_single_session(database, session_id, source=selected_source)
     if error:
         console.print(f"[red]Error: {error}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Successfully enriched session {session_id}[/green]")
+
+
+@sources_app.command("list")
+def list_sources(
+    db: Annotated[Path, typer.Option("--db", "-d", help="Path to SQLite database file.")] = _DEFAULT_DB,
+):
+    """List named Copilot CLI sources for an archive."""
+    database = _make_database_for_command(db, allow_create=True)
+    for source in database.list_sources():
+        state = "enabled" if source.enabled else "disabled"
+        console.print(f"{source.name}\t{state}\t{source.base_dir}")
+
+
+@sources_app.command("presets")
+def list_source_presets():
+    """List application presets detected on this machine."""
+    presets = discover_source_presets()
+    if not presets:
+        console.print("No source presets detected.")
+        return
+    for preset in presets:
+        console.print(f"{preset.preset_id}\t{preset.name}\t{preset.base_dir}")
+
+
+@sources_app.command("add")
+def add_source(
+    name: Annotated[str, typer.Option("--name", help="Unique case-insensitive identifier.")],
+    base_dir: Annotated[Path | None, typer.Option("--base-dir", help="Application Copilot base directory.")] = None,
+    preset: Annotated[str | None, typer.Option("--preset", help="Detected preset ID, such as scout.")] = None,
+    db: Annotated[Path, typer.Option("--db", "-d", help="Path to SQLite database file.")] = _DEFAULT_DB,
+):
+    """Register a named Copilot CLI source."""
+    if (base_dir is None) == (preset is None):
+        console.print("[red]Error: specify exactly one of --base-dir or --preset.[/red]")
+        raise typer.Exit(1)
+    if preset:
+        detected = {item.preset_id: item for item in discover_source_presets()}
+        selected = detected.get(preset.casefold())
+        if selected is None:
+            console.print(f"[red]Error: Source preset is not available: {preset}[/red]")
+            raise typer.Exit(1)
+        base_dir = selected.base_dir
+    database = _make_database_for_command(db, allow_create=True)
+    try:
+        if base_dir is None:
+            raise RuntimeError("Source base directory was not resolved.")
+        source = database.add_source(name, base_dir)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]Added source {source.name}: {source.base_dir}[/green]")
+
+
+@sources_app.command("rename")
+def rename_source(
+    source: Annotated[str, typer.Argument(help="Existing source name or ID.")],
+    name: Annotated[str, typer.Option("--name", help="New unique case-insensitive identifier.")],
+    db: Annotated[Path, typer.Option("--db", "-d", help="Path to SQLite database file.")] = _DEFAULT_DB,
+):
+    """Rename a source while preserving session identities."""
+    database = _make_database_for_command(db)
+    try:
+        renamed = database.rename_source(source, name)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]Renamed source to {renamed.name}[/green]")
+
+
+def _set_source_state(source: str, db: Path, *, enabled: bool) -> None:
+    database = _make_database_for_command(db)
+    try:
+        updated = database.set_source_enabled(source, enabled=enabled)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]{'Enabled' if enabled else 'Disabled'} source {updated.name}[/green]")
+
+
+@sources_app.command("disable")
+def disable_source(
+    source: Annotated[str, typer.Argument(help="Source name or ID.")],
+    db: Annotated[Path, typer.Option("--db", "-d", help="Path to SQLite database file.")] = _DEFAULT_DB,
+):
+    """Disable live reads and refresh for a source."""
+    _set_source_state(source, db, enabled=False)
+
+
+@sources_app.command("enable")
+def enable_source(
+    source: Annotated[str, typer.Argument(help="Source name or ID.")],
+    db: Annotated[Path, typer.Option("--db", "-d", help="Path to SQLite database file.")] = _DEFAULT_DB,
+):
+    """Re-enable live reads and refresh for a source."""
+    _set_source_state(source, db, enabled=True)
 
 
 _CONTENT_TYPES_HELP = "Available types: " + ", ".join(sorted(CONTENT_TYPES))
@@ -404,6 +534,10 @@ def search(
             "-r",
             help="Filter by message role (user or assistant).",
         ),
+    ] = None,
+    source: Annotated[
+        str | None,
+        typer.Option("--source", help="Filter results to one named Copilot CLI source."),
     ] = None,
     title_filter: Annotated[
         str | None,
@@ -514,6 +648,9 @@ def search(
     search_content_set = resolve_search_content_set(include, exclude)
 
     database = _prepare_database_for_command(db, rescan_session_id=rescan_session)
+    if source and database.get_source(source) is None:
+        console.print(f"[red]Error: Source not found: {source}[/red]")
+        raise typer.Exit(1)
     results = database.search(
         query,
         limit=limit,
@@ -523,6 +660,7 @@ def search(
         session_title=title_filter,
         sort_by=sort_by,
         repository=repository_filter,
+        source_name=source,
     )
 
     if json_output:

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sources - {{ title }}</title>
+    <style>
+        :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+        body { margin: 0; background: #0d1117; color: #e6edf3; }
+        main { max-width: 960px; margin: 0 auto; padding: 32px 20px; }
+        a { color: #58a6ff; }
+        h1 { margin-top: 12px; }
+        .card { border: 1px solid #30363d; border-radius: 8px; padding: 18px; margin: 16px 0; background: #161b22; }
+        .source-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(260px, 2fr) auto; gap: 16px; align-items: center; }
+        .path { color: #8b949e; overflow-wrap: anywhere; }
+        .status { font-size: 0.8rem; border-radius: 999px; padding: 3px 8px; background: #238636; }
+        .status.disabled { background: #6e7681; }
+        form.inline { display: inline-flex; gap: 8px; margin-top: 12px; }
+        input, select, button { font: inherit; padding: 7px 10px; }
+        input[type="text"] { min-width: 240px; }
+        button { cursor: pointer; }
+        .flash { border: 1px solid #30363d; padding: 10px; border-radius: 6px; margin: 12px 0; }
+        .error { border-color: #f85149; }
+        @media (max-width: 700px) { .source-row { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+<main>
+    <a href="/">&larr; Back to sessions</a>
+    <h1>Copilot CLI sources</h1>
+    <p>Each source pairs an application's <code>session-store.db</code> with its local session event files. Source databases are read-only.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+    {% endwith %}
+
+    {% for source in sources %}
+    <section class="card">
+        <div class="source-row">
+            <strong>{{ source.name }}</strong>
+            <span class="path">{{ source.base_dir }}</span>
+            <span class="status{% if not source.enabled %} disabled{% endif %}">{{ "enabled" if source.enabled else "disabled" }}</span>
+        </div>
+        {% if not source.is_default %}
+        <form class="inline" method="post" action="/sources/{{ source.source_id }}/rename">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="text" name="name" value="{{ source.name }}" aria-label="New source identifier" required>
+            <button type="submit">Rename</button>
+        </form>
+        <form class="inline" method="post" action="/sources/{{ source.source_id }}/toggle">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="enabled" value="{{ 'false' if source.enabled else 'true' }}">
+            <button type="submit">{{ "Disable" if source.enabled else "Enable" }}</button>
+        </form>
+        {% endif %}
+    </section>
+    {% endfor %}
+
+    <section class="card">
+        <h2>Add source</h2>
+        <form method="post" action="/sources/add">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <p><label>Identifier <input type="text" name="name" required></label></p>
+            <p><label>Copilot base directory <input type="text" name="base_dir" placeholder="C:\path\to\copilot"></label></p>
+            {% if presets %}
+            <p><label>Or detected preset
+                <select name="preset">
+                    <option value="">None</option>
+                    {% for preset in presets %}
+                    <option value="{{ preset.preset_id }}">{{ preset.name }} - {{ preset.base_dir }}</option>
+                    {% endfor %}
+                </select>
+            </label></p>
+            {% endif %}
+            <button type="submit">Add source</button>
+        </form>
+    </section>
+</main>
+</body>
+</html>

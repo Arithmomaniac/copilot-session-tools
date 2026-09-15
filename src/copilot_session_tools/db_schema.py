@@ -35,6 +35,8 @@ CST_SESSION_COLUMNS = (
     "source_format",
     "enrichment_version",
     "builtin_turns",
+    "source_id",
+    "native_session_id",
 )
 
 CST_MESSAGE_COLUMNS = (
@@ -178,6 +180,8 @@ def session_to_row(
         session.source_format,
         enrichment_version,
         builtin_turns,
+        session.source_id,
+        session.native_session_id,
     )
 
 
