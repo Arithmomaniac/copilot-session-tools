@@ -1,0 +1,19 @@
+{"type": "session.start", "timestamp": 1706745600, "data": {"sessionId": "cli-external-tools-test-session", "startTime": "2026-01-31T12:00:00Z"}}
+{"type": "user.message", "timestamp": 1706745601, "data": {"content": "Rename this session, reply to the review thread, and open the PR."}}
+{"type": "assistant.message", "timestamp": 1706745602, "data": {"content": "On it - renaming the session and branch, replying to the comment, then opening the PR."}}
+{"type": "external_tool.requested", "timestamp": 1706745603, "data": {"requestId": "ext-1", "sessionId": "cli-external-tools-test-session", "toolCallId": "tc-ext-1", "toolName": "rename_session", "arguments": {"title": "Upstream sync plan"}}}
+{"type": "external_tool.completed", "timestamp": 1706745604, "data": {"requestId": "ext-1"}}
+{"type": "external_tool.requested", "timestamp": 1706745605, "data": {"requestId": "ext-2", "sessionId": "cli-external-tools-test-session", "toolCallId": "tc-ext-2", "toolName": "rename_branch", "arguments": {"name": "upstream-sync-plan"}}}
+{"type": "external_tool.completed", "timestamp": 1706745606, "data": {"requestId": "ext-2"}}
+{"type": "external_tool.requested", "timestamp": 1706745607, "data": {"requestId": "ext-3", "sessionId": "cli-external-tools-test-session", "toolCallId": "tc-ext-3", "toolName": "reply_to_comment", "arguments": {"threadId": "thread:cb55bb1d", "commentId": "cb55bb1d", "threadToken": "9e3d30cf", "response": "Trimmed the line to just the credit. New line reads:\n\n> Forked from holman/dotfiles."}}}
+{"type": "external_tool.completed", "timestamp": 1706745608, "data": {"requestId": "ext-3"}}
+{"type": "assistant.message", "timestamp": 1706745609, "data": {"content": "Annotating the risky line, then opening the PR.", "toolRequests": [{"toolCallId": "tc-grep-1", "name": "grep", "arguments": {"pattern": "TODO", "path": "src/app.py"}}]}}
+{"type": "tool.execution_start", "timestamp": 1706745610, "data": {"toolCallId": "tc-grep-1", "toolName": "grep", "arguments": {"pattern": "TODO", "path": "src/app.py"}}}
+{"type": "tool.execution_complete", "timestamp": 1706745611, "data": {"toolCallId": "tc-grep-1", "toolName": "grep", "success": true, "result": {"content": "src/app.py:42: # TODO: handle refresh"}}}
+{"type": "external_tool.requested", "timestamp": 1706745612, "data": {"requestId": "ext-4", "sessionId": "cli-external-tools-test-session", "toolCallId": "tc-ext-4", "toolName": "annotate_diff_line", "arguments": {"file": "src/app.py", "line": 42, "title": "Unhandled refresh", "explanation": "This branch never refreshes the token.", "severity": "warning"}}}
+{"type": "external_tool.completed", "timestamp": 1706745613, "data": {"requestId": "ext-4"}}
+{"type": "external_tool.requested", "timestamp": 1706745613, "data": {"requestId": "ext-noarg", "sessionId": "cli-external-tools-test-session", "toolCallId": "tc-ext-noarg", "toolName": "list_sessions_and_chats"}}
+{"type": "external_tool.completed", "timestamp": 1706745613, "data": {"requestId": "ext-noarg"}}
+{"type": "external_tool.requested", "timestamp": 1706745614, "data": {"requestId": "ext-5", "sessionId": "cli-external-tools-test-session", "toolCallId": "tc-ext-5", "toolName": "create_pull_request", "arguments": {"title": "Enrich external-tool rendering", "body": "Render parameters for external tools and note that no response is recorded."}}}
+{"type": "external_tool.completed", "timestamp": 1706745615, "data": {"requestId": "ext-5"}}
+{"type": "assistant.message", "timestamp": 1706745616, "data": {"content": "Done - session renamed, comment replied, line annotated, and PR opened."}}

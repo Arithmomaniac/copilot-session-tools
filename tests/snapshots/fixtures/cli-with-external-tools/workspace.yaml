@@ -1,0 +1,3 @@
+id: cli-external-tools-test-session
+cwd: /home/user/myproject
+summary: Exercise external (host-app) tool rendering

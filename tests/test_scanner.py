@@ -2306,7 +2306,7 @@ class TestCLINewEventHandlers:
         )
 
         assert session is not None
-        assert self._find_status_blocks(session, "external-tool")[0].content == "External tool requested: ext"
+        assert self._find_status_blocks(session, "external-tool") == []
         assert self._find_status_blocks(session, "command")[0].content == "Command queued: npm test"
         assert self._find_status_blocks(session, "truncation")[0].content == "Context truncated: context_window"
         assert self._find_status_blocks(session, "workspace-file")[0].content == "Workspace file changed: updated src/app.py"
@@ -2324,6 +2324,72 @@ class TestCLINewEventHandlers:
 
         assert session is not None
         assert self._find_status_blocks(session, "hook-error")[0].content == "Hook failed: postToolUse - blocked"
+
+    def _find_tool_invocations(self, session, name=None):
+        """Return all tool invocations across messages, optionally filtered by name."""
+        tools = []
+        for msg in session.messages:
+            for tool in msg.tool_invocations:
+                if name is None or tool.name == name:
+                    tools.append(tool)
+        return tools
+
+    def test_external_tool_renders_with_parameters(self, tmp_path):
+        """external_tool.requested should render as a tool block exposing its parameters."""
+        session = self._parse(
+            tmp_path,
+            {"type": "user.message", "data": {"content": "Rename it"}},
+            {"type": "assistant.message", "data": {"content": "Renaming."}},
+            {
+                "type": "external_tool.requested",
+                "data": {
+                    "requestId": "r1",
+                    "toolCallId": "tc1",
+                    "toolName": "rename_session",
+                    "arguments": {"title": "Upstream sync plan"},
+                },
+            },
+            {"type": "external_tool.completed", "data": {"requestId": "r1"}},
+        )
+
+        assert session is not None
+        # No longer a thin status breadcrumb.
+        assert self._find_status_blocks(session, "external-tool") == []
+        # Rendered as a proper tool invocation carrying the parameters.
+        tools = self._find_tool_invocations(session, "rename_session")
+        assert len(tools) == 1
+        tool = tools[0]
+        assert tool.source_type == "external"
+        # Parameters are preserved in the serialized input.
+        assert tool.input is not None
+        assert "Upstream sync plan" in tool.input
+        # The host does not record a response, so result stays unset.
+        assert tool.result is None
+        # Label falls back to the tool name (same default as builtin tools without a
+        # specific format) — the parameters live in the input, not the header.
+        assert tool.invocation_message == "rename_session"
+        # A matching inline content block exists for template pairing.
+        tool_blocks = [cb for msg in session.messages for cb in msg.content_blocks if cb.kind == "toolInvocation"]
+        assert any(cb.content == "rename_session" for cb in tool_blocks)
+
+    def test_external_tool_without_arguments(self, tmp_path):
+        """An external tool with no arguments still renders as a tool block, not a status line."""
+        session = self._parse(
+            tmp_path,
+            {"type": "assistant.message", "data": {"content": "Working."}},
+            {
+                "type": "external_tool.requested",
+                "data": {"requestId": "r2", "toolCallId": "tc2", "toolName": "list_sessions_and_chats"},
+            },
+            {"type": "external_tool.completed", "data": {"requestId": "r2"}},
+        )
+
+        assert session is not None
+        assert self._find_status_blocks(session, "external-tool") == []
+        tools = self._find_tool_invocations(session, "list_sessions_and_chats")
+        assert len(tools) == 1
+        assert tools[0].source_type == "external"
+        assert tools[0].result is None
 
 
 class TestCLISubagentBrackets:

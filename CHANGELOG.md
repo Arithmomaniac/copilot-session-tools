@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-08-06
+
+### Changed
+
+- **Scanner / Web Viewer**: External (host-app) tools (`external_tool.requested` / `external_tool.completed`) now render as collapsible tool blocks that expose their parameters, instead of a one-line status breadcrumb. Because the host application runs these tools and never returns a result into the session, the block shows an explicit "Response: Not recorded" note, and an `external tool` badge distinguishes them from CLI tools. Affects the web viewer and HTML export.
+
 ## [0.17.1] - 2026-06-30
 
 ### Fixed

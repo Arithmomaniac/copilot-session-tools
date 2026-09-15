@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Create and edit files via CLI tools - Create and edit files via CLI tools</title>
+    <title>Exercise external (host-app) tool rendering - Exercise external (host-app) tool rendering</title>
     
     <style>
 :root {
@@ -2208,7 +2208,7 @@ input:checked + .toggle-switch::after {
     </style>
     
 </head>
-<body class="hide-thinking hide-diffs hide-tool-inputs">
+<body>
     
 
     <main class="container">
@@ -2216,14 +2216,12 @@ input:checked + .toggle-switch::after {
 
         <div class="session-detail-meta">
             
-            <span>📁 /home/user/myproject</span>
-            
             
             <span>Created: 2026-01-31T12:00:00Z</span>
             
-            <small>ID: <code>cli-file-changes-session</code></small>
+            <small>ID: <code>cli-external-tools-test-session</code></small>
             
-            <small>Source: <code>cli-file-changes</code></small>
+            <small>Source: <code>cli-with-external-tools</code></small>
             
         </div>
 
@@ -2257,7 +2255,7 @@ input:checked + .toggle-switch::after {
                     
                     
                         
-                        <p>Create utils.py and then tweak it.</p>
+                        <p>Rename this session, reply to the review thread, and open the PR.</p>
                     
 
                 
@@ -2303,7 +2301,7 @@ input:checked + .toggle-switch::after {
                             
                             
                             <div class="content-block content-block-text result-block">
-                                <p>Creating the file and editing it.</p>
+                                <p>On it - renaming the session and branch, replying to the comment, then opening the PR.</p>
                             </div>
                             
                             
@@ -2332,9 +2330,43 @@ input:checked + .toggle-switch::after {
                             
                             
                             
-                            
-                            <div class="content-block content-block-toolInvocation tool-invocation-unmatched">
-                                <div class="tool-invocation-message"><p>Created <code>utils.py</code></p></div>
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="external-tool-badge">external tool</span>
+                                        <span class="tool-invocation-message"><p>rename_session</p></span>
+                                        
+                                    </summary>
+                                    <div class="tool-invocation-content">
+                                        <div class="tool-section tool-section-meta">
+                                            <span class="tool-label">Tool:</span>
+                                            <code>rename_session</code>
+                                        </div>
+                                        
+                                        
+                                        
+                                        <div class="tool-section tool-section-input">
+                                            <span class="tool-label">Input:</span>
+                                            <pre><code><span class="highlighted-code"><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Upstream sync plan&quot;</span>
+<span class="p">}</span>
+</span></code></pre>
+                                        </div>
+                                        
+                                        
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
+                                        </div>
+                                        
+                                    </div>
+                                </details>
+                                
+                                <div class="tool-invocation-inline-fallback">
+                                    <p>rename_session</p>
+                                    
+                                </div>
                             </div>
                             
                             
@@ -2365,9 +2397,43 @@ input:checked + .toggle-switch::after {
                             
                             
                             
-                            
-                            <div class="content-block content-block-toolInvocation tool-invocation-unmatched">
-                                <div class="tool-invocation-message"><p>Edited <code>utils.py</code></p></div>
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="external-tool-badge">external tool</span>
+                                        <span class="tool-invocation-message"><p>rename_branch</p></span>
+                                        
+                                    </summary>
+                                    <div class="tool-invocation-content">
+                                        <div class="tool-section tool-section-meta">
+                                            <span class="tool-label">Tool:</span>
+                                            <code>rename_branch</code>
+                                        </div>
+                                        
+                                        
+                                        
+                                        <div class="tool-section tool-section-input">
+                                            <span class="tool-label">Input:</span>
+                                            <pre><code><span class="highlighted-code"><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;upstream-sync-plan&quot;</span>
+<span class="p">}</span>
+</span></code></pre>
+                                        </div>
+                                        
+                                        
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
+                                        </div>
+                                        
+                                    </div>
+                                </details>
+                                
+                                <div class="tool-invocation-inline-fallback">
+                                    <p>rename_branch</p>
+                                    
+                                </div>
                             </div>
                             
                             
@@ -2398,9 +2464,46 @@ input:checked + .toggle-switch::after {
                             
                             
                             
-                            
-                            <div class="content-block content-block-toolInvocation tool-invocation-unmatched">
-                                <div class="tool-invocation-message"><p>Edited <code>missing.py</code></p></div>
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="external-tool-badge">external tool</span>
+                                        <span class="tool-invocation-message"><p>reply_to_comment</p></span>
+                                        
+                                    </summary>
+                                    <div class="tool-invocation-content">
+                                        <div class="tool-section tool-section-meta">
+                                            <span class="tool-label">Tool:</span>
+                                            <code>reply_to_comment</code>
+                                        </div>
+                                        
+                                        
+                                        
+                                        <div class="tool-section tool-section-input">
+                                            <span class="tool-label">Input:</span>
+                                            <pre><code><span class="highlighted-code"><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;threadId&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;thread:cb55bb1d&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;commentId&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cb55bb1d&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;threadToken&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;9e3d30cf&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;response&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Trimmed the line to just the credit. New line reads:\n\n&gt; Forked from holman/dotfiles.&quot;</span>
+<span class="p">}</span>
+</span></code></pre>
+                                        </div>
+                                        
+                                        
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
+                                        </div>
+                                        
+                                    </div>
+                                </details>
+                                
+                                <div class="tool-invocation-inline-fallback">
+                                    <p>reply_to_comment</p>
+                                    
+                                </div>
                             </div>
                             
                             
@@ -2410,73 +2513,277 @@ input:checked + .toggle-switch::after {
                             
                             
                             <div class="content-block content-block-text result-block">
-                                <p>Done: created utils.py and added a multiply helper.</p>
+                                <p>Annotating the risky line, then opening the PR.</p>
                             </div>
                             
                             
                         
-                    
-
-                
-                
-                
-                    
-                    
-                
-                    
-                    
-                
-                    
-                    
-                
-                
-                
-
-                
-                <p class="tool-summary tool-summary-files"><em>Changed 1 file: /home/user/myproject/utils.py</em></p>
-                <details class="collapsible file-changes" open>
-                    <summary aria-label="Toggle file changes section">
-                        <span class="collapsible-icon" aria-hidden="true">▼</span>
-                        File Changes (1)
-                        <span class="preview-text">utils.py</span>
-                    </summary>
-                    <div class="collapsible-content">
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            <div class="content-block content-block-toolInvocation tool-invocation-unmatched">
+                                <div class="tool-invocation-message"><p>Searching for <code>TODO</code> in <code>app.py</code></p></div>
+                            </div>
+                            
+                            
+                            
+                            
                         
-                        <div class="file-change">
-                            <div class="file-header">
-                                <strong>utils.py</strong>
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="external-tool-badge">external tool</span>
+                                        <span class="tool-invocation-message"><p>annotate_diff_line</p></span>
+                                        
+                                    </summary>
+                                    <div class="tool-invocation-content">
+                                        <div class="tool-section tool-section-meta">
+                                            <span class="tool-label">Tool:</span>
+                                            <code>annotate_diff_line</code>
+                                        </div>
+                                        
+                                        
+                                        
+                                        <div class="tool-section tool-section-input">
+                                            <span class="tool-label">Input:</span>
+                                            <pre><code><span class="highlighted-code"><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;file&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;src/app.py&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;line&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Unhandled refresh&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;explanation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;This branch never refreshes the token.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;severity&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;warning&quot;</span>
+<span class="p">}</span>
+</span></code></pre>
+                                        </div>
+                                        
+                                        
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
+                                        </div>
+                                        
+                                    </div>
+                                </details>
                                 
-                                <span class="language-badge">python</span>
-                                
-                                
-                                
-                                <span class="file-stats">
-                                    <span class="file-stat-add">+10</span>
+                                <div class="tool-invocation-inline-fallback">
+                                    <p>annotate_diff_line</p>
                                     
-                                </span>
-                                
+                                </div>
                             </div>
                             
                             
-                            <pre class="diff"><code>--- a/utils.py
-+++ b/utils.py
-@@ -0,0 +1,10 @@
-+def add(a, b):
-+    return a + b
-+
-+
-+def sub(a, b):
-+    return a - b
-+
-+
-+def mul(a, b):
-+    return a * b
-</code></pre>
                             
-                        </div>
+                            
                         
-                    </div>
-                </details>
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="external-tool-badge">external tool</span>
+                                        <span class="tool-invocation-message"><p>list_sessions_and_chats</p></span>
+                                        
+                                    </summary>
+                                    <div class="tool-invocation-content">
+                                        <div class="tool-section tool-section-meta">
+                                            <span class="tool-label">Tool:</span>
+                                            <code>list_sessions_and_chats</code>
+                                        </div>
+                                        
+                                        
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
+                                        </div>
+                                        
+                                    </div>
+                                </details>
+                                
+                                <div class="tool-invocation-inline-fallback">
+                                    <p>list_sessions_and_chats</p>
+                                    
+                                </div>
+                            </div>
+                            
+                            
+                            
+                            
+                        
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="external-tool-badge">external tool</span>
+                                        <span class="tool-invocation-message"><p>create_pull_request</p></span>
+                                        
+                                    </summary>
+                                    <div class="tool-invocation-content">
+                                        <div class="tool-section tool-section-meta">
+                                            <span class="tool-label">Tool:</span>
+                                            <code>create_pull_request</code>
+                                        </div>
+                                        
+                                        
+                                        
+                                        <div class="tool-section tool-section-input">
+                                            <span class="tool-label">Input:</span>
+                                            <pre><code><span class="highlighted-code"><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Enrich external-tool rendering&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Render parameters for external tools and note that no response is recorded.&quot;</span>
+<span class="p">}</span>
+</span></code></pre>
+                                        </div>
+                                        
+                                        
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
+                                        </div>
+                                        
+                                    </div>
+                                </details>
+                                
+                                <div class="tool-invocation-inline-fallback">
+                                    <p>create_pull_request</p>
+                                    
+                                </div>
+                            </div>
+                            
+                            
+                            
+                            
+                        
+                            
+                            
+                            <div class="content-block content-block-text result-block">
+                                <p>Done - session renamed, comment replied, line annotated, and PR opened.</p>
+                            </div>
+                            
+                            
+                        
+                    
+
+                
+                
+                
+                    
+                    
+                
+                    
+                    
+                
+                    
+                    
+                
+                    
+                    
+                
+                    
+                    
+                
+                    
+                    
+                
+                    
+                    
+                
+                
+                
+
                 
 
                 

@@ -1390,6 +1390,30 @@ header h1 {
     margin-bottom: 4px;
 }
 
+.tool-no-response {
+    display: block;
+    font-size: 0.85em;
+    font-style: italic;
+    color: var(--text-secondary);
+    opacity: 0.85;
+}
+
+.external-tool-badge {
+    display: inline-block;
+    font-size: 0.72em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.12));
+    border: 1px solid var(--border-color, rgba(127, 127, 127, 0.3));
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-right: 6px;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
 .tool-section pre {
     margin: 0;
     padding: 10px;
@@ -3099,9 +3123,11 @@ input:checked + .toggle-switch::after {
                             {# - run_in_terminal (has command input and terminal output) #}
                             {# Internal file tools (copilot_readFile, etc.) just show pretty invocation message #}
                             {% set is_mcp_tool = matched_tool.source_type == 'mcp' %}
+                            {% set is_external_tool = matched_tool.source_type == 'external' %}
                             {% set is_terminal_tool = matched_tool.name == 'run_in_terminal' %}
                             {% set has_tool_details = matched_tool.input or matched_tool.result %}
-                            {% set show_collapsible = (is_mcp_tool or is_terminal_tool) and has_tool_details %}
+                            {# External (host-app) tools are always collapsible so the "no response recorded" note is shown, even when they take no parameters. #}
+                            {% set show_collapsible = ((is_mcp_tool or is_terminal_tool) and has_tool_details) or is_external_tool %}
                             
                             {# Determine the pretty header text - use invocation_message if available, else block content #}
                             {% set pretty_header = matched_tool.invocation_message if matched_tool.invocation_message else block.content %}
@@ -3156,6 +3182,7 @@ input:checked + .toggle-switch::after {
                                 <details class="tool-invocation-wrapper" open>
                                     <summary>
                                         <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        {% if is_external_tool %}<span class="external-tool-badge">external tool</span>{% endif %}
                                         <span class="tool-invocation-message">{{ pretty_header | markdown | safe }}</span>
                                         {% if matched_tool.status %}
                                         <span class="status-badge {{ matched_tool.status }}">{{ matched_tool.status }}</span>
@@ -3181,6 +3208,11 @@ input:checked + .toggle-switch::after {
                                         <div class="tool-section tool-section-output">
                                             <span class="tool-label">Output:</span>
                                             <pre><code>{{ highlight_code(tool_out, tool_out_lang) }}</code></pre>
+                                        </div>
+                                        {% elif is_external_tool %}
+                                        <div class="tool-section tool-section-output tool-section-no-response">
+                                            <span class="tool-label">Response:</span>
+                                            <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
                                         </div>
                                         {% endif %}
                                     </div>
@@ -3225,7 +3257,7 @@ input:checked + .toggle-switch::after {
                 {# Show unmatched tool invocations #}
                 {% set unmatched_tools = [] %}
                 {% for tool in tool_invocations %}
-                    {% set is_collapsible_tool = (tool.source_type == 'mcp' or tool.name == 'run_in_terminal') and (tool.input or tool.result) %}
+                    {% set is_collapsible_tool = ((tool.source_type == 'mcp' or tool.name == 'run_in_terminal') and (tool.input or tool.result)) or tool.source_type == 'external' %}
                     {% if tool.name not in (meta.get('matched_tool_names', []) if meta else []) and is_collapsible_tool %}
                         {% set _ = unmatched_tools.append(tool) %}
                     {% endif %}
@@ -3243,6 +3275,7 @@ input:checked + .toggle-switch::after {
                         <details class="tool-invocation-wrapper" open>
                             <summary>
                                 <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                {% if tool.source_type == 'external' %}<span class="external-tool-badge">external tool</span>{% endif %}
                                 {% if tool.invocation_message %}
                                 <span class="tool-invocation-message">{{ tool.invocation_message | markdown | safe }}</span>
                                 {% else %}
@@ -3272,6 +3305,11 @@ input:checked + .toggle-switch::after {
                                 <div class="tool-section tool-section-output">
                                     <span class="tool-label">Output:</span>
                                     <pre><code>{{ highlight_code(utool_out, utool_out_lang) }}</code></pre>
+                                </div>
+                                {% elif tool.source_type == 'external' %}
+                                <div class="tool-section tool-section-output tool-section-no-response">
+                                    <span class="tool-label">Response:</span>
+                                    <span class="tool-no-response">Not recorded — this tool is run by the host application, which does not return a result into the session.</span>
                                 </div>
                                 {% endif %}
                             </div>

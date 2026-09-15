@@ -184,11 +184,6 @@ def _format_session_event_status(event_type: str, event_data: dict) -> tuple[str
         return f"Command executed: {command}" if command else "Command executed", "command"
     if event_type == "command.completed":
         return "Command completed", "command"
-    if event_type == "external_tool.requested":
-        tool_name = _stringify_event_value(event_data.get("toolName"))
-        return f"External tool requested: {tool_name}" if tool_name else "External tool requested", "external-tool"
-    if event_type == "external_tool.completed":
-        return "External tool completed", "external-tool"
     if event_type == "hook.end" and not event_data.get("success", True):
         hook_type = _stringify_event_value(event_data.get("hookType"))
         error = _stringify_event_value(event_data.get("error"))
@@ -717,6 +712,36 @@ class _CliSessionBuilder:
                 )
             )
             self.current_assistant_tool_invocations.append(tool_inv)
+
+    def add_external_tool_inline(self, tool_call_id: str, tool_name: str, arguments: object) -> None:
+        """Add an external (host-app) tool invocation inline in the current assistant message.
+
+        External tools come from ``external_tool.requested`` events. The request carries the
+        tool name and its ``arguments`` (parameters), but the paired ``external_tool.completed``
+        event is a bare acknowledgement with no result payload — the host application executes
+        these tools and does not record a response back into the session. We therefore render the
+        parameters (previously discarded) and leave ``result`` unset; the template surfaces a note
+        explaining that no response was recorded.
+        """
+        argument_dict = _as_tool_argument_dict(arguments)
+        description = _get_tool_arg_str(argument_dict, "description") or None
+        invocation_message = _format_tool_display_message(tool_name, argument_dict, description)
+        tool_inv = ToolInvocation(
+            name=tool_name,
+            input=_serialize_tool_arguments(arguments),
+            result=None,
+            status=None,
+            invocation_message=invocation_message,
+            source_type="external",
+        )
+        self.current_assistant_content_blocks.append(
+            ContentBlock(
+                kind="toolInvocation",
+                content=invocation_message or tool_name,
+                description=description or tool_name,
+            )
+        )
+        self.current_assistant_tool_invocations.append(tool_inv)
 
 
 def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
@@ -1480,6 +1505,17 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                 answer = _stringify_event_value(event_data.get("answer"))
                 if answer:
                     builder.current_assistant_content_blocks.append(ContentBlock(kind="status", content=f"User answered: {answer}", description="user-input"))
+
+            elif event_type == "external_tool.requested":
+                # Host-app tool invoked outside the CLI. The request carries the parameters;
+                # render them as a proper tool block instead of a bare status breadcrumb.
+                ext_tool_name = _stringify_event_value(event_data.get("toolName"))
+                ext_tool_call_id = _stringify_event_value(event_data.get("toolCallId"))
+                builder.add_external_tool_inline(ext_tool_call_id, ext_tool_name, event_data.get("arguments", {}))
+
+            elif event_type == "external_tool.completed":
+                # Bare acknowledgement (only carries requestId) — no result payload to render.
+                pass
 
             elif formatted_status := _format_session_event_status(event_type, event_data):
                 content, description = formatted_status

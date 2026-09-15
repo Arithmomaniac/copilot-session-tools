@@ -93,6 +93,65 @@ class TestCLIAgentSessionSnapshot:
         file_regression.check(html, fullpath=BASELINES_DIR / "cli-with-agents.html", encoding="utf-8")
 
 
+# --- CLI Session with External (host-app) Tools Snapshots ---
+
+_cli_external_tools_events = FIXTURES_DIR / "cli-with-external-tools" / "events.jsonl"
+_cli_external_tools_fixture_exists = _cli_external_tools_events.exists() if FIXTURES_DIR.exists() else False
+
+
+@pytest.mark.skipif(not _cli_external_tools_fixture_exists, reason="CLI external tools fixture not populated")
+class TestCLIExternalToolsSnapshot:
+    """Snapshot tests for CLI session with external (host-app) tool rendering."""
+
+    session: ChatSession
+
+    @pytest.fixture(autouse=True)
+    def parse_session(self):
+        parsed = _parse_cli_jsonl_file(_cli_external_tools_events)
+        assert parsed is not None, f"Failed to parse CLI external tools fixture: {_cli_external_tools_events}"
+        self.session = parsed
+        self.session.source_file = "cli-with-external-tools"
+
+    def test_markdown_export(self, file_regression):
+        md = session_to_markdown(
+            self.session,
+            content_set={"diffs", "tool-inputs", "thinking", "agent-details", "tools", "commands", "file-changes"},
+        )
+        file_regression.check(md, fullpath=BASELINES_DIR / "cli-with-external-tools.md", encoding="utf-8")
+
+    def test_html_export(self, file_regression):
+        html = session_to_html(
+            self.session,
+            content_set={"diffs", "tool-inputs", "thinking", "agent-details", "tools", "commands", "file-changes"},
+        )
+        file_regression.check(html, fullpath=BASELINES_DIR / "cli-with-external-tools.html", encoding="utf-8")
+
+    def test_external_tools_parsed(self):
+        """External tools render as ToolInvocations carrying parameters but no result."""
+        external = [t for msg in self.session.messages for t in msg.tool_invocations if t.source_type == "external"]
+        names = sorted(t.name for t in external)
+        assert names == [
+            "annotate_diff_line",
+            "create_pull_request",
+            "list_sessions_and_chats",
+            "rename_branch",
+            "rename_session",
+            "reply_to_comment",
+        ]
+        # Every external tool records no response; all but the no-arg one expose parameters.
+        for tool in external:
+            assert tool.result is None, f"external tool {tool.name} should not record a response"
+        assert all(t.input for t in external if t.name != "list_sessions_and_chats")
+        # The no-argument external tool still parses as an external ToolInvocation.
+        noarg = [t for t in external if t.name == "list_sessions_and_chats"]
+        assert len(noarg) == 1
+
+    def test_external_tools_not_status_blocks(self):
+        """External tools must not leak through as bare status breadcrumbs."""
+        status_descs = [cb.description for msg in self.session.messages for cb in msg.content_blocks if cb.kind == "status"]
+        assert "external-tool" not in status_descs
+
+
 # --- CLI Session with Async Shells Snapshots ---
 
 _cli_async_shells_events = FIXTURES_DIR / "cli-with-async-shells" / "events.jsonl"
