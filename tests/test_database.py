@@ -2751,6 +2751,7 @@ class TestSchemaV6:
         # Bootstrap a v6 schema first, then downgrade version to simulate v5
         ensure_schema(conn)
         conn.execute("UPDATE cst_schema_version SET version = 5")
+        conn.execute("DROP TABLE cst_sources")
 
         # Insert dummy data that should be wiped by migration
         conn.execute(

@@ -308,6 +308,43 @@ END;
 # ---------------------------------------------------------------------------
 
 
+def _finalize_source_schema(cursor: sqlite3.Cursor) -> None:
+    from .sources import DEFAULT_SOURCE_ID, DEFAULT_SOURCE_NAME
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO cst_sources
+            (source_id, name, name_key, base_dir, base_dir_key, enabled, is_default)
+        VALUES (?, ?, ?, '', '', 1, 1)
+        """,
+        (DEFAULT_SOURCE_ID, DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_NAME.casefold()),
+    )
+    cursor.execute(
+        "UPDATE cst_sources SET name = name_key WHERE source_id != ?",
+        (DEFAULT_SOURCE_ID,),
+    )
+    cursor.execute(
+        "UPDATE cst_sources SET name = ?, name_key = ? WHERE source_id = ?",
+        (DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_ID),
+    )
+    cursor.execute(
+        """
+        UPDATE cst_sessions
+        SET source_id = ?, native_session_id = session_id
+        WHERE type = 'cli' AND source_id IS NULL
+        """,
+        (DEFAULT_SOURCE_ID,),
+    )
+    cursor.execute("DROP INDEX IF EXISTS idx_cst_sessions_source_native")
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cst_sessions_native
+        ON cst_sessions(native_session_id)
+        WHERE native_session_id IS NOT NULL
+        """
+    )
+
+
 def _drop_and_recreate_cst_tables(conn: sqlite3.Connection) -> None:
     """Drop and recreate all cst_* tables for major schema migrations.
 
@@ -340,6 +377,7 @@ def _drop_and_recreate_cst_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(CST_FTS_SCHEMA)
     # Insert fresh schema version
     cursor.execute("INSERT INTO cst_schema_version (version) VALUES (?)", (CST_SCHEMA_VERSION,))
+    _finalize_source_schema(cursor)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -468,40 +506,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             (CST_SCHEMA_VERSION,),
         )
 
-    from .sources import DEFAULT_SOURCE_ID, DEFAULT_SOURCE_NAME
-
-    cursor.execute(
-        """
-        INSERT OR IGNORE INTO cst_sources
-            (source_id, name, name_key, base_dir, base_dir_key, enabled, is_default)
-        VALUES (?, ?, ?, '', '', 1, 1)
-        """,
-        (DEFAULT_SOURCE_ID, DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_NAME.casefold()),
-    )
-    cursor.execute(
-        "UPDATE cst_sources SET name = name_key WHERE source_id != ?",
-        (DEFAULT_SOURCE_ID,),
-    )
-    cursor.execute(
-        "UPDATE cst_sources SET name = ?, name_key = ? WHERE source_id = ?",
-        (DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_ID),
-    )
-    cursor.execute(
-        """
-        UPDATE cst_sessions
-        SET source_id = ?, native_session_id = session_id
-        WHERE type = 'cli' AND source_id IS NULL
-        """,
-        (DEFAULT_SOURCE_ID,),
-    )
-    cursor.execute("DROP INDEX IF EXISTS idx_cst_sessions_source_native")
-    cursor.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_cst_sessions_native
-        ON cst_sessions(native_session_id)
-        WHERE native_session_id IS NOT NULL
-        """
-    )
+    _finalize_source_schema(cursor)
 
 
 def check_builtin_schema_version(conn: sqlite3.Connection) -> None:
