@@ -316,6 +316,119 @@ class TestResponseItemKinds:
         assert result[1].kind == "toolInvocation"
         assert result[2].kind == "toolInvocation"
 
+    def test_question_carousel_renders_prompt_options_and_answers(self):
+        response_items = [
+            {
+                "kind": "questionCarousel",
+                "message": {"value": "Please answer these questions."},
+                "questions": [
+                    {
+                        "id": "database",
+                        "type": "singleSelect",
+                        "title": "Database",
+                        "message": {"value": "Which database should be used?"},
+                        "options": [
+                            {"id": "pg", "label": "PostgreSQL", "value": "postgres"},
+                            {"id": "sqlite", "label": "SQLite", "value": "sqlite"},
+                        ],
+                    }
+                ],
+                "data": {"database": {"selectedValue": "postgres"}},
+                "isUsed": True,
+            }
+        ]
+
+        _, raw_blocks, _, _, _ = _process_response_items(response_items)
+
+        assert raw_blocks == [
+            (
+                "ask_user",
+                "Please answer these questions.\n\n1. **Database**: Which database should be used?\n   Options: PostgreSQL, SQLite\n   Answer: postgres",
+                "questions",
+            )
+        ]
+
+    def test_completed_elicitation_renders_question_and_outcome(self):
+        response_items = [
+            {
+                "kind": "elicitationSerialized",
+                "title": {"value": "Continue waiting?"},
+                "message": {"value": "Poll for output for two more minutes."},
+                "state": "rejected",
+                "isHidden": True,
+            }
+        ]
+
+        _, raw_blocks, _, _, _ = _process_response_items(response_items)
+
+        assert raw_blocks == [
+            (
+                "ask_user",
+                "**Continue waiting?**\n\nPoll for output for two more minutes.\n\nResponse: rejected",
+                "elicitationSerialized",
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ("kind", "item", "expected_content", "expected_description"),
+        [
+            (
+                "progressMessage",
+                {"kind": "progressMessage", "content": {"value": "Analyzing answers..."}},
+                "Analyzing answers...",
+                "progressMessage",
+            ),
+            (
+                "warning",
+                {"kind": "warning", "content": {"value": "Chat took too long."}},
+                "Chat took too long.",
+                "warning",
+            ),
+            (
+                "systemNotification",
+                {"kind": "systemNotification", "content": {"value": "Workspace changed."}},
+                "Workspace changed.",
+                "systemNotification",
+            ),
+            (
+                "hook",
+                {"kind": "hook", "hookType": "PostToolUse", "systemMessage": "\x1b[31mHook failed\x1b[0m"},
+                "PostToolUse: Hook failed",
+                "hook",
+            ),
+            (
+                "autoModeResolution",
+                {"kind": "autoModeResolution", "resolved": {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol"}},
+                "Auto selected GPT-5.6 Sol",
+                "auto-mode",
+            ),
+        ],
+    )
+    def test_structured_status_response_kinds_render(self, kind, item, expected_content, expected_description):
+        _, raw_blocks, _, _, _ = _process_response_items([item])
+
+        assert raw_blocks == [("status", expected_content, expected_description)], kind
+
+    def test_plan_review_renders_content_and_result(self):
+        response_items = [
+            {
+                "kind": "planReview",
+                "title": "Implementation plan",
+                "content": "1. Add parser support\n2. Add tests",
+                "data": {"actionId": "approve", "rejected": False},
+            }
+        ]
+
+        _, raw_blocks, _, _, _ = _process_response_items(response_items)
+
+        assert raw_blocks == [
+            (
+                "ask_user",
+                "**Implementation plan**\n\n1. Add parser support\n2. Add tests\n\nResponse: approve",
+                "planReview",
+            )
+        ]
+
 
 class TestSampleFilesParsing:
     """Tests using real sample files to validate parsing logic."""
@@ -1940,6 +2053,79 @@ class TestCLINewEventHandlers:
         )
         assert session is not None
         assert self._find_status_blocks(session, "fork") == []
+
+    def test_auto_mode_resolution_renders_selected_model(self, tmp_path):
+        session = self._parse(
+            tmp_path,
+            {
+                "type": "session.auto_mode_resolved",
+                "data": {
+                    "chosenModel": "claude-sonnet-5",
+                    "reasoningBucket": "high",
+                    "categoryScores": {"reasoning": 0.9},
+                },
+            },
+        )
+
+        blocks = self._find_status_blocks(session, "auto-mode")
+        assert [block.content for block in blocks] == ["Auto selected claude-sonnet-5 (high reasoning)"]
+
+    def test_fusion_events_reduce_to_one_safe_status(self, tmp_path):
+        session = self._parse(
+            tmp_path,
+            {
+                "type": "session.fusion_resolved",
+                "data": {
+                    "fusionId": "fusion-1",
+                    "pattern": "critique",
+                    "primaryModel": "gpt-5.6-sol",
+                    "secondaryModel": "claude-opus-5",
+                },
+            },
+            {
+                "type": "assistant.fusion_phase_completed",
+                "data": {
+                    "fusionId": "fusion-1",
+                    "phaseKind": "primary",
+                    "model": "gpt-5.6-sol",
+                    "content": "Internal draft that must not render",
+                },
+            },
+            {
+                "type": "assistant.fusion_phase_completed",
+                "data": {
+                    "fusionId": "fusion-1",
+                    "phaseKind": "judge",
+                    "model": "claude-opus-5",
+                    "verdict": "reject",
+                    "content": "Internal critique that must not render",
+                },
+            },
+            {
+                "type": "session.fusion_handoff",
+                "data": {
+                    "fusionId": "fusion-1",
+                    "targetModel": "gpt-5.6-sol",
+                    "message": {"content": "Internal handoff prompt that must not render"},
+                },
+            },
+            {
+                "type": "session.fusion_completed",
+                "data": {
+                    "fusionId": "fusion-1",
+                    "outcome": "completed",
+                    "finalSourceModel": "gpt-5.6-sol",
+                },
+            },
+            {"type": "assistant.message", "data": {"content": "Final answer"}},
+        )
+
+        blocks = self._find_status_blocks(session, "fusion")
+        assert [block.content for block in blocks] == ["Fusion · Critique · gpt-5.6-sol + claude-opus-5; Drafted answer; Changes requested; Final response prepared"]
+        rendered_content = "\n".join(block.content for message in session.messages for block in message.content_blocks)
+        assert "Internal draft" not in rendered_content
+        assert "Internal critique" not in rendered_content
+        assert "Internal handoff" not in rendered_content
 
     # --- session.warning ---
 

@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "copilot-session-tools"
-version = "0.17.1"
+version = "0.18.0"
 description = "A collection of tools for VS Code GitHub Copilot chat history"
 readme = "README.md"
 requires-python = ">=3.12"
