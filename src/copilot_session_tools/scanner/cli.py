@@ -2,6 +2,7 @@
 
 import html
 import json
+import logging
 import re
 from pathlib import Path
 from typing import cast
@@ -31,6 +32,7 @@ _SESSION_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _FORK_BOUNDARY_PATTERN = re.compile(rf" before event (?P<event_id>{_SESSION_ID_PATTERN})", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 
 def _as_tool_argument_dict(arguments: object) -> dict[str, object]:
@@ -719,7 +721,13 @@ class _CliSessionBuilder:
             self.current_assistant_tool_invocations.append(tool_inv)
 
 
-def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
+def _parse_cli_jsonl_file(
+    file_path: Path,
+    *,
+    _events: list[dict] | None = None,
+    _agent_id: str | None = None,
+    _agent_nesting_level: int = 0,
+) -> ChatSession | None:
     """Parse a GitHub Copilot CLI JSONL session file.
 
     CLI sessions are stored as JSONL (JSON Lines) where each line is a JSON object
@@ -749,19 +757,20 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         ChatSession object or None if parsing fails.
     """
     try:
-        events = []
+        events = _events
+        if events is None:
+            events = []
+            with file_path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
 
-        with file_path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    data = ssrjson.loads(line)
-                    events.append(data)
-                except ssrjson.JSONDecodeError:
-                    continue
+                    try:
+                        data = ssrjson.loads(line)
+                        events.append(data)
+                    except ssrjson.JSONDecodeError:
+                        continue
 
         if not events:
             return None
@@ -938,7 +947,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                     subagent_completions.add(tool_call_id)
 
             elif event_type == "subagent.selected":
-                if timestamp is None:
+                if timestamp is None or event.get("agentId") or _agent_id:
                     continue
                 if active_root_agent is not None:
                     active_root_agent.end_timestamp = timestamp
@@ -954,7 +963,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                 )
 
             elif event_type == "subagent.deselected":
-                if active_root_agent is not None:
+                if not event.get("agentId") and not _agent_id and active_root_agent is not None:
                     active_root_agent.end_timestamp = timestamp
                     root_agent_intervals.append(active_root_agent)
                     active_root_agent = None
@@ -990,8 +999,17 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
             event_data = event.get("data", {})
             timestamp = event.get("timestamp")
 
-            # Skip events belonging to a subagent — they have parentToolCallId
-            if event_data.get("parentToolCallId"):
+            # Lifecycle events belong to the caller, or a standalone container when no task is recorded.
+            event_agent_id = event.get("agentId") or None
+            if event_type in ("subagent.started", "subagent.completed", "subagent.failed"):
+                execution = tool_executions.get(event_data.get("toolCallId"), {})
+                start_event = execution.get("start")
+                event_agent_id = (start_event or {}).get("agentId") or None
+            if event_agent_id != _agent_id:
+                continue
+
+            # Legacy child events without agent identity are rendered by the caller.
+            if event_data.get("parentToolCallId") and _agent_id is None:
                 continue
 
             if event_type == "user.message":
@@ -1293,14 +1311,44 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                     role="assistant",
                     content=content,
                     agent_display_name=title,
-                    # TODO: For multi-level nesting, derive from parent's nesting level
-                    agent_nesting_level=1,
+                    agent_nesting_level=_agent_nesting_level + 1,
                     source_event_id=builder.current_assistant_source_event_id,
                     tool_invocations=nested_tool_invocations,
                     command_runs=nested_command_runs,
                     content_blocks=nested_blocks,
                     file_changes=nested_consolidated_changes,
                 )
+
+                stream_agent_id = event.get("agentId")
+                if stream_agent_id and stream_agent_id != _agent_id:
+                    child_session = _parse_cli_jsonl_file(
+                        file_path,
+                        _events=events,
+                        _agent_id=stream_agent_id,
+                        _agent_nesting_level=_agent_nesting_level + 2,
+                    )
+                    if child_session is None:
+                        logger.error("Failed to parse delegated agent stream %s in %s", stream_agent_id, file_path)
+                        return None
+                    if child_session.messages:
+                        child_msg = ChatMessage(
+                            role="assistant",
+                            content="",
+                            timestamp=timestamp,
+                            source_event_id=event.get("id"),
+                            agent_id=stream_agent_id,
+                            agent_display_name=title,
+                            agent_nesting_level=_agent_nesting_level + 1,
+                            children=child_session.messages,
+                            content_blocks=[
+                                ContentBlock(kind="subagent", content=message.content, description=message.role.title(), child_message=message)
+                                for message in child_session.messages
+                            ],
+                        )
+                        nested_blocks = child_msg.content_blocks
+                        nested_tool_invocations = []
+                        nested_command_runs = []
+                        nested_consolidated_changes = []
 
                 block = ContentBlock(
                     kind=kind,
@@ -1309,7 +1357,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                     child_message=child_msg,
                     prompt=_get_tool_arg_str(req_args, "prompt"),
                     is_background=is_bg,
-                    agent_id=bg_id if is_bg else "",
+                    agent_id=stream_agent_id or (bg_id if is_bg else ""),
                 )
                 # Also set deprecated fields for backward compat during transition
                 block.content_blocks = nested_blocks
@@ -1575,7 +1623,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         builder.flush_assistant_message()
 
         messages = builder.messages
-        if not messages:
+        if not messages and _agent_id is None:
             return None
 
         # Post-process: collect shell IO entries and attach to parent CommandRun
@@ -1674,6 +1722,9 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
             root_agent_intervals=root_agent_intervals,
             context_entries=context_entries,
         )
+        for message in messages:
+            message.agent_id = _agent_id
+            message.agent_nesting_level = _agent_nesting_level
         session.parser_version = PARSER_VERSION
         return session
     except (OSError, Exception):

@@ -196,6 +196,8 @@ Features:
 - **Dark mode** via CSS `prefers-color-scheme`
 - **Incremental refresh** without restarting
 
+CLI root-agent selection is tracked separately from delegated agent streams. Events with a top-level `agentId` retain their identity and source-event references inside nested task messages; they do not replace the parent root-agent interval or appear as root-user requests. Legacy child tools using `parentToolCallId` remain supported. Existing sessions are reparsed when their stored parser version is older than the current scanner.
+
 ## Transcript Cleanup
 
 Voice-dictated user messages often come out garbled (repeated words, filler words, broken sentences). Transcript cleanup uses an LLM to rewrite them, using the assistant's response and reasoning as context for what you actually meant.

@@ -9,6 +9,7 @@ import pytest
 
 from copilot_session_tools import ChatMessage, ChatSession, CommandRun, ContentBlock, Database, FileChange, ToolInvocation, parse_search_query
 from copilot_session_tools.scanner import RootAgentInterval, SessionContextEntry
+from copilot_session_tools.scanner.cli import _parse_cli_jsonl_file
 
 
 @pytest.fixture
@@ -191,6 +192,46 @@ class TestDatabase:
             assert usage["session_count"] == 1
             assert usage["message_count"] == 2
             assert usage["tool_count"] == 1
+
+    def test_cli_delegated_stream_attribution_survives_enrichment(self, temp_db, tmp_path):
+        events = [
+            {"type": "session.start", "data": {"sessionId": "delegated-stream-session"}},
+            {"type": "subagent.selected", "data": {"agentName": "review-pr-comments"}},
+            {"type": "user.message", "id": "root-user", "data": {"content": "Review feedback"}},
+            {"type": "tool.execution_start", "data": {"toolCallId": "task-1", "toolName": "task", "arguments": {"agent_type": "smart-merge"}}},
+            {"type": "subagent.started", "agentId": "merge-1", "data": {"toolCallId": "task-1", "agentName": "smart-merge"}},
+            {"type": "subagent.selected", "agentId": "merge-1", "data": {"agentName": "smart-merge"}},
+            {"type": "user.message", "id": "child-user", "agentId": "merge-1", "data": {"content": "Merge upstream"}},
+            {
+                "type": "tool.execution_start",
+                "agentId": "merge-1",
+                "data": {"toolCallId": "child-view", "toolName": "view", "arguments": {"path": "README.md"}},
+            },
+            {"type": "assistant.message", "id": "child-answer", "agentId": "merge-1", "data": {"content": "Feature preserved"}},
+            {"type": "tool.execution_complete", "data": {"toolCallId": "task-1", "success": True, "result": {"content": "Feature preserved"}}},
+            {"type": "subagent.completed", "agentId": "merge-1", "data": {"toolCallId": "task-1"}},
+            {"type": "assistant.message", "id": "root-answer", "data": {"content": "Review continues"}},
+        ]
+        for index, event in enumerate(events):
+            event["timestamp"] = f"2026-01-01T00:00:{index:02d}Z"
+        source = tmp_path / "events.jsonl"
+        source.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+        session = _parse_cli_jsonl_file(source)
+        assert session is not None
+        temp_db.enrich_session(session)
+        temp_db.enrich_session(session)
+
+        with temp_db._get_connection() as conn:
+            intervals = conn.execute("SELECT agent_name, end_timestamp FROM cst_root_agent_intervals").fetchall()
+            assert [(row["agent_name"], row["end_timestamp"]) for row in intervals] == [("review-pr-comments", None)]
+            child = conn.execute("SELECT * FROM cst_messages WHERE source_event_id = 'child-user'").fetchone()
+            assert child["agent_id"] == "merge-1"
+            assert child["agent_nesting_level"] > 0
+            assert child["parent_message_id"] is not None
+            root_users = conn.execute("SELECT content FROM cst_messages WHERE role = 'user' AND parent_message_id IS NULL").fetchall()
+            assert [row["content"] for row in root_users] == ["Review feedback"]
+            tools = conn.execute("SELECT ti.name, m.agent_id FROM cst_tool_invocations ti JOIN cst_messages m ON m.id = ti.message_id ORDER BY ti.id").fetchall()
+            assert sorted((row["name"], row["agent_id"] or "") for row in tools) == [("task", ""), ("view", "merge-1")]
 
     def test_root_agent_views_include_nested_subagent_activity(self, temp_db):
         """Root-agent usage includes child subagent work inside the interval."""

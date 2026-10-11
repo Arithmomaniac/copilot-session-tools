@@ -5,7 +5,7 @@ Data structures are informed by:
 - microsoft/vscode (https://github.com/microsoft/vscode)
 """
 
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 
 from .cli import _parse_cli_jsonl_file, _parse_workspace_yaml
 from .content import (
