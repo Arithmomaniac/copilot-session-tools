@@ -167,9 +167,9 @@ def compute_voice_score_with_textstat(text: str) -> float:
 # ---------------------------------------------------------------------------
 
 TRI_REVIEW_MODELS = [
-    "github_copilot/claude-sonnet-4.6",
-    "github_copilot/gpt-5.4",
-    "github_copilot/gemini-3-pro-preview",
+    ("github_copilot/claude-opus-5.5", "high"),
+    ("github_copilot/gpt-6-astra", "high"),
+    ("github_copilot/gemini-3.8-flash", "medium"),
 ]
 
 LABELING_PROMPT = """You are a text analysis expert. For each user message below, determine whether it was:
@@ -213,7 +213,11 @@ LABELING_RESPONSE_SCHEMA = {
 }
 
 
-def label_messages_with_model(messages: list[str], model: str) -> list[dict]:
+def label_messages_with_model(
+    messages: list[str],
+    model: str,
+    reasoning_effort: str,
+) -> list[dict]:
     """Ask a single model to label messages as voice/typed."""
     prompt = LABELING_PROMPT
     for i, msg in enumerate(messages):
@@ -225,6 +229,7 @@ def label_messages_with_model(messages: list[str], model: str) -> list[dict]:
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.0,
+        reasoning_effort=reasoning_effort,
     )
     content = response.choices[0].message.content
     # Strip markdown code fences if present
@@ -242,10 +247,10 @@ def get_consensus_labels(messages: list[str]) -> list[dict]:
     all_labels: dict[int, list[str]] = {i: [] for i in range(len(messages))}
     model_results = {}
 
-    for model in TRI_REVIEW_MODELS:
-        print(f"  Labeling with {model}...")
+    for model, reasoning_effort in TRI_REVIEW_MODELS:
+        print(f"  Labeling with {model} ({reasoning_effort})...")
         try:
-            results = label_messages_with_model(messages, model)
+            results = label_messages_with_model(messages, model, reasoning_effort)
             model_results[model] = results
             for r in results:
                 idx = r["index"]
@@ -275,10 +280,21 @@ def get_consensus_labels(messages: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 CLEANUP_MODELS = [
-    "github_copilot/gpt-4o-mini",
+    "github_copilot/gemini-3.8-flash",
+    "github_copilot/gpt-6-luna",
+    "github_copilot/gpt-6-sol",
     "github_copilot/claude-haiku-4.5",
-    "github_copilot/gpt-5-mini",
+    "github_copilot/claude-haiku-5.5",
+    "github_copilot/gemini-4-argon",
 ]
+
+CLEANUP_REASONING_EFFORTS = {
+    "github_copilot/gemini-3.8-flash": "medium",
+    "github_copilot/gpt-6-luna": "high",
+    "github_copilot/gpt-6-sol": "medium",
+    "github_copilot/claude-haiku-5.5": "high",
+    "github_copilot/gemini-4-argon": "high",
+}
 
 CLEANUP_SYSTEM_PROMPT = """You are a transcript cleanup assistant. You receive voice-dictated text \
 that may contain speech-to-text errors. Using the provided context, rewrite the message to \
@@ -357,13 +373,19 @@ def cleanup_single(garbled: str, context: str, model: str) -> CleanupBenchmarkRe
 
     start = time.perf_counter()
     try:
-        response = litellm.completion(
-            model=model,
-            messages=[
+        kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": CLEANUP_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.0,
+            "temperature": 0.0,
+        }
+        reasoning_effort = CLEANUP_REASONING_EFFORTS.get(model)
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
+        response = litellm.completion(
+            **kwargs,
         )
         elapsed = time.perf_counter() - start
         content = response.choices[0].message.content

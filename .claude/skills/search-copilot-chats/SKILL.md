@@ -1,6 +1,6 @@
 ---
 name: search-copilot-chats
-description: Search archived Copilot chat sessions using Chronicle/session_store SQL as the first hint layer, then copilot-session-tools for targeted lookup/export. Use when the user says "search my chats", "find in chat history", "what did we discuss about X", "look up past sessions", "scan chats", "session history", "recent session where", "earlier conversation", "previous session", "that session where", or references a session-state path or session GUID. Also covers exporting narrowed sessions as markdown/HTML and launching the web viewer.
+description: Search archived Copilot chat sessions using Chronicle/session_store SQL as the first hint layer, then copilot-session-tools for targeted lookup/export. Use when the user says "search my chats", "find in chat history", "what did we discuss about X", "look up past sessions", "scan chats", "session history", "recent session where", "earlier conversation", "previous session", "that session where", or supplies a session-state path or session GUID to recover conversation context. Also covers exporting narrowed sessions as markdown/HTML and launching the web viewer. Do not activate merely to read, edit, open, copy, or upload an ordinary artifact stored under session-state/files.
 ---
 
 # Search Copilot Chats
@@ -12,10 +12,12 @@ Search, browse, and export archived GitHub Copilot chat sessions from VS Code (S
 ## When to use
 
 - User asks to search past Copilot conversations ("what did we discuss about X?")
-- User pastes a `session-state` path or session GUID and wants context from it
+- User supplies a `session-state` path or session GUID and wants archived conversation context
 - User pastes a web viewer URL like `http://127.0.0.1:5000/session/{uuid}`
 - User wants to find prior decisions, code patterns, or troubleshooting steps from past sessions
 - User asks to export a session as markdown, HTML, or JSON
+
+An ordinary artifact under `session-state/files` is not a conversation-history request. For example, "copy the HTML report to OneDrive" uses file-transfer tools, not this skill, even if the report's path contains a session GUID.
 
 ## Default workflow: Chronicle first, CLI second
 

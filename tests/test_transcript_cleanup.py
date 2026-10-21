@@ -198,16 +198,20 @@ class TestCallCleanupLLM:
     def test_basic_call(self):
         mock_result = {"messages": [{"index": 0, "is_voice": True, "cleaned": "cleaned text"}]}
 
-        with patch("copilot_session_tools.transcript_cleanup._structured_completion", return_value=mock_result):
+        with patch(
+            "copilot_session_tools.transcript_cleanup._structured_completion",
+            return_value=mock_result,
+        ) as structured_completion:
             results = call_cleanup_llm(
                 [{"role": "user", "content": "test"}],
-                model="github_copilot/gpt-5.4-mini",
+                model="github_copilot/gemini-3.8-flash",
                 expected_count=1,
             )
 
         assert len(results) == 1
         assert results[0]["is_voice"] is True
         assert results[0]["cleaned"] == "cleaned text"
+        assert structured_completion.call_args.kwargs["reasoning_effort"] == "medium"
 
     def test_wrong_count_raises(self):
         """If the LLM returns wrong number of results, raise ValueError."""
@@ -219,7 +223,7 @@ class TestCallCleanupLLM:
         ):
             call_cleanup_llm(
                 [{"role": "user", "content": "test"}],
-                model="github_copilot/gpt-5.4-mini",
+                model="github_copilot/gemini-3.8-flash",
                 expected_count=2,
             )
 
@@ -308,7 +312,7 @@ class TestCleanupSession:
         # Message 0 should be cleaned
         assert session.messages[0].content == "I want to add a button"
         assert "basically" in session.messages[0].original_content
-        assert session.messages[0].cleanup_model == "github_copilot/gpt-5.4-mini"
+        assert session.messages[0].cleanup_model == "github_copilot/gemini-3.8-flash"
 
         # Message 2 should be unchanged (not voice)
         assert session.messages[2].content == "yes go ahead"
