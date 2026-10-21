@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Refresh and fallback**: Chronicle discovery, JSONL enrichment, staleness checks, targeted enrichment, and orphan cleanup now operate per source. Disabled or unavailable sources retain archived content.
 - **Application filters**: The `cli` button now includes only the built-in Copilot CLI source. Every added source gets its own lowercase button, such as `scout`, while VS Code editions remain separate.
 
+### Fixed
+
+- **Search**: Queries containing punctuation such as `.`, `/`, `@`, `,`, `+`, or `'` (e.g. `db_search.py`) no longer fail with `fts5: syntax error`. Any non-bareword token is now quoted, while `^` and trailing `*` operators are preserved. Tool, file, command, and thinking searches now match the raw search text instead of the FTS5-escaped string.
+
 ## [0.17.1] - 2026-06-30
 
 ### Fixed

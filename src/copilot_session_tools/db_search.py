@@ -18,6 +18,7 @@ class ParsedQuery:
     """Represents a parsed search query with extracted field filters."""
 
     fts_query: str  # The FTS5 query string for content search
+    text_query: str = ""  # Unescaped search text (field prefixes removed) for LIKE matching
     role: str | None = None  # Extracted role filter (user/assistant)
     workspace: str | None = None  # Extracted workspace filter
     workspaces: list[str] | None = None  # All extracted workspace filters
@@ -53,16 +54,21 @@ def _validate_date_format(date_str: str) -> str | None:
         return None
 
 
+# FTS5 bareword characters: ASCII alphanumerics, underscore, non-ASCII, and \x1a
+_FTS5_BAREWORD_RE = re.compile("[A-Za-z0-9_\x1a\u0080-\U0010ffff]+")
+
+
 def _escape_fts5_token(token: str) -> str:
     """Escape a single FTS5 token to prevent syntax errors.
 
-    FTS5 has special operators like:
-    - Dash (-) which means NOT
-    - Colon (:) for column specification
-    - Parentheses, brackets for grouping
+    FTS5 only accepts unquoted "barewords" made of ASCII letters, digits,
+    underscores, and non-ASCII characters. Any other character (``.``, ``/``,
+    ``-``, ``:``, ``@``, ``,``, ``+``, ``'``, parentheses, ...) is a syntax
+    error unless the token is quoted as a string.
 
-    If a token is already quoted, leave it as-is.
-    Otherwise, wrap it in quotes if it contains special characters.
+    If a token is already quoted, leave it as-is. Otherwise, wrap it in quotes
+    if it is not a bareword. A leading ``^`` (first-token) and trailing ``*``
+    (prefix match) are preserved as operators.
 
     Args:
         token: A single search token (word or phrase).
@@ -74,23 +80,25 @@ def _escape_fts5_token(token: str) -> str:
         return token
 
     # If already quoted, leave as-is
-    if token.startswith('"') and token.endswith('"'):
+    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
         return token
 
-    # FTS5 special characters that need escaping:
-    # - (dash/NOT operator), : (column spec), (, ), [, ]
-    # Note: We don't need to escape * (prefix match) or ^ (first token)
-    # as these are useful operators users might want to use
-    special_chars = ["-", ":", "(", ")", "[", "]"]
+    prefix = "^" if token.startswith("^") else ""
+    core = token[len(prefix) :]
+    suffix = "*" if core.endswith("*") else ""
+    if suffix:
+        core = core[:-1]
 
-    # Check if token contains any special characters
-    if any(char in token for char in special_chars):
-        # Escape internal quotes by doubling them (FTS5 convention)
-        escaped = token.replace('"', '""')
-        # Wrap in quotes
-        return f'"{escaped}"'
+    if not core:
+        # Lone operator characters (e.g. "*" or "^") are searched literally
+        return '"' + token.replace('"', '""') + '"'
 
-    return token
+    if _FTS5_BAREWORD_RE.fullmatch(core):
+        return token
+
+    # Escape internal quotes by doubling them (FTS5 convention)
+    escaped = core.replace('"', '""')
+    return f'{prefix}"{escaped}"{suffix}'
 
 
 def parse_search_query(query: str) -> ParsedQuery:
@@ -161,6 +169,7 @@ def parse_search_query(query: str) -> ParsedQuery:
     # 1. Quoted phrases (keep as-is)
     # 2. Unquoted words (escape special chars and join with spaces for implicit AND)
 
+    raw_tokens: list[str] = []
     if not remaining_query:
         fts_query = ""
     else:
@@ -174,6 +183,7 @@ def parse_search_query(query: str) -> ParsedQuery:
             # Clean up any empty quotes
             if token == '""':
                 continue
+            raw_tokens.append(token[1:-1] if len(token) >= 2 and token.startswith('"') and token.endswith('"') else token)
             # Escape FTS5 special characters in the token
             escaped_token = _escape_fts5_token(token)
             tokens.append(escaped_token)
@@ -183,6 +193,7 @@ def parse_search_query(query: str) -> ParsedQuery:
 
     return ParsedQuery(
         fts_query=fts_query,
+        text_query=" ".join(raw_tokens),
         role=role,
         workspace=workspaces[0] if workspaces else None,
         workspaces=workspaces or None,
@@ -915,7 +926,7 @@ def execute_search(
         )
 
     # For tool/file/command/thinking searches, use LIKE matching
-    search_terms = fts_query if fts_query else query
+    search_terms = parsed.text_query if fts_query else query
     like_pattern = f"%{search_terms}%"
 
     if include_tools and len(results) < limit and search_terms:

@@ -1928,6 +1928,62 @@ class TestFTS5SpecialCharacterEscaping:
         assert len(results) > 0
         assert any("Python" in r["content"] for r in results)
 
+    @pytest.mark.parametrize(
+        "query",
+        ["db_search.py", "src/app", "user@example.com", "a,b", "c++", "it's", "1+1=2", "~/.config", "$HOME", "#123", "a.b*", "."],
+    )
+    def test_non_bareword_punctuation_in_query(self, temp_db, query):
+        """Test that any non-bareword punctuation (e.g. '.', '/', '@') doesn't cause FTS5 syntax errors."""
+        session = ChatSession(
+            session_id="punct-test",
+            workspace_name="test-project",
+            workspace_path="/test",
+            messages=[
+                ChatMessage(role="user", content="Edit db_search.py in src/app and email user@example.com"),
+            ],
+        )
+        temp_db.add_session(session)
+
+        results = temp_db.search(query)
+        assert isinstance(results, list)
+
+    def test_dotted_filename_query_finds_match(self, temp_db):
+        """Test that a dotted file name is searched as a phrase and matches."""
+        session = ChatSession(
+            session_id="dotted-test",
+            workspace_name="test-project",
+            workspace_path="/test",
+            messages=[
+                ChatMessage(role="user", content="Please refactor db_search.py for clarity."),
+            ],
+        )
+        temp_db.add_session(session)
+
+        results = temp_db.search("db_search.py")
+        assert len(results) > 0
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("foo.py", '"foo.py"'),
+            ("foo*", "foo*"),
+            ("^foo", "^foo"),
+            ("foo.*", '"foo."*'),
+            ("^a/b", '^"a/b"'),
+            ('"exact phrase"', '"exact phrase"'),
+            ("naïve", "naïve"),
+            ("*", '"*"'),
+        ],
+    )
+    def test_fts_query_escaping(self, query, expected):
+        """Test non-bareword tokens are quoted while ^ and * operators are preserved."""
+        assert parse_search_query(query).fts_query == expected
+
+    def test_text_query_is_unescaped(self):
+        """Test LIKE search text keeps raw terms without FTS5 quoting or field prefixes."""
+        parsed = parse_search_query('role:user main.py test-driven "exact phrase"')
+        assert parsed.text_query == "main.py test-driven exact phrase"
+
 
 class TestGranularSearchContentSet:
     """Tests for search_content_set column-selective search and agent nesting gate."""
