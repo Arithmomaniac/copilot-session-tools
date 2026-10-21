@@ -368,6 +368,45 @@ class TestCLI:
         assert "must match --session-id" in result.output
         assert not db_path.exists()
 
+    def test_export_markdown_rescan_refreshes_existing_session_from_events(self, runner, tmp_path):
+        session_id = "ae66ae58-1974-466a-893f-3670d72de8f7"
+        events_file = tmp_path / "events.jsonl"
+        db_path = tmp_path / "archive.db"
+        output_dir = tmp_path / "markdown_output"
+        original_content = "Original message"
+        new_content = "New message"
+        events = [
+            {"type": "session.start", "data": {"sessionId": session_id}, "timestamp": "2026-10-21T06:00:00Z"},
+            {"type": "user.message", "data": {"content": original_content}, "timestamp": "2026-10-21T06:00:01Z"},
+        ]
+        command = [
+            "export-markdown",
+            "--db",
+            str(db_path),
+            "--output-dir",
+            str(output_dir),
+            "--session-id",
+            session_id,
+            "--rescan-session",
+            session_id,
+        ]
+        with patch("copilot_session_tools.refresh._find_cli_events_file", return_value=events_file):
+            events_file.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+            initial = runner.invoke(app, command)
+            assert initial.exit_code == 0, initial.output
+
+            events.append({"type": "user.message", "data": {"content": new_content}, "timestamp": "2026-10-21T06:00:02Z"})
+            events_file.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+            refreshed = runner.invoke(app, command)
+
+        assert refreshed.exit_code == 0, refreshed.output
+        [exported_file] = output_dir.glob("*.md")
+        exported = exported_file.read_text(encoding="utf-8")
+        assert new_content in exported
+        stored = Database(db_path).get_session(session_id)
+        assert stored is not None
+        assert [message.content for message in stored.messages] == [original_content, new_content]
+
     def test_export_markdown_rescan_session_surfaces_enrichment_error(self, runner, tmp_path):
         """Targeted rescan failures stop the command before export."""
         db_path = tmp_path / "missing.db"

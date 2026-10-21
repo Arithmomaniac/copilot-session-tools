@@ -75,7 +75,7 @@ class TestScanner:
     def test_scan_chat_sessions(self, mock_workspace_storage):
         """Test scanning for chat sessions."""
         storage_paths = [(str(mock_workspace_storage), "stable")]
-        sessions = list(scan_chat_sessions(storage_paths))
+        sessions = list(scan_chat_sessions(storage_paths, include_cli=False))
 
         assert len(sessions) >= 1
         session = sessions[0]
@@ -1971,6 +1971,38 @@ class TestCLINewEventHandlers:
         assert block.agent_id == "child-1"
         assert block.child_message is not None
         assert block.child_message.content == "Research complete"
+
+    def test_delegated_streams_share_event_index(self, tmp_path):
+        from copilot_session_tools.scanner.cli import _parse_cli_jsonl_file
+
+        event_reads = 0
+
+        class CountedEvent(dict):
+            def get(self, key, default=None):
+                nonlocal event_reads
+                event_reads += 1
+                return super().get(key, default)
+
+        events = [CountedEvent(type="session.start", data={"sessionId": "fanout-session"})]
+        for i in range(100):
+            agent_id = f"child-{i}"
+            tool_call_id = f"task-{i}"
+            events.extend(
+                [
+                    CountedEvent(type="tool.execution_start", data={"toolCallId": tool_call_id, "toolName": "task", "arguments": {}}),
+                    CountedEvent(type="subagent.started", agentId=agent_id, data={"toolCallId": tool_call_id}),
+                    CountedEvent(type="user.message", agentId=agent_id, data={"content": f"Request {i}"}),
+                    CountedEvent(type="assistant.message", agentId=agent_id, data={"content": f"Answer {i}"}),
+                    CountedEvent(type="subagent.completed", agentId=agent_id, data={"toolCallId": tool_call_id}),
+                ]
+            )
+        source = tmp_path / "events.jsonl"
+        source.write_text("", encoding="utf-8")
+
+        session = _parse_cli_jsonl_file(source, _events=events)
+
+        assert session is not None
+        assert event_reads < 128 * len(events)
 
     def test_unlinked_agent_stream_retains_nested_prompt_without_inventing_task(self, tmp_path):
         session = self._parse(

@@ -77,6 +77,59 @@ class TestDatabase:
         stats = temp_db.get_stats()
         assert stats["session_count"] == 1
 
+    @pytest.mark.parametrize("existing_schema", [False, True])
+    def test_reenrichment_does_not_scan_unrelated_content_blocks(self, temp_db, existing_schema):
+        from copilot_session_tools.db_storage import enrich_session
+
+        session = ChatSession(
+            session_id="refresh-target",
+            workspace_name="test",
+            workspace_path="/tmp/test",
+            messages=[ChatMessage(role="user", content=f"Message {i}") for i in range(40)],
+        )
+        unrelated = ChatSession(
+            session_id="unrelated-session",
+            workspace_name="test",
+            workspace_path="/tmp/test",
+            messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="Unrelated content",
+                    content_blocks=[ContentBlock(kind="text", content=f"Block {i}") for i in range(2000)],
+                )
+            ],
+        )
+        temp_db.add_session(session)
+        temp_db.add_session(unrelated)
+        if existing_schema:
+            with temp_db._get_connection() as conn:
+                conn.execute("DROP INDEX IF EXISTS idx_cst_content_blocks_child_message")
+            temp_db = Database(temp_db.db_path)
+
+        session.messages[0].content = "Updated content"
+        progress_calls = 0
+
+        def instruction_budget_exceeded():
+            nonlocal progress_calls
+            progress_calls += 1
+            return progress_calls > 100
+
+        with temp_db._get_connection() as conn:
+            assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+            # Bound SQLite work, not wall time: unrelated blocks must not be scanned per message.
+            conn.set_progress_handler(instruction_budget_exceeded, 1000)
+            try:
+                enrich_session(conn, session)
+            finally:
+                conn.set_progress_handler(None, 0)
+
+        retrieved = temp_db.get_session(session.session_id)
+        assert retrieved is not None
+        assert [message.content for message in retrieved.messages] == [message.content for message in session.messages]
+        preserved = temp_db.get_session(unrelated.session_id)
+        assert preserved is not None
+        assert [block.content for block in preserved.messages[0].content_blocks] == [block.content for block in unrelated.messages[0].content_blocks]
+
     def test_get_session(self, temp_db, sample_session):
         """Test retrieving a session from the database."""
         temp_db.add_session(sample_session)

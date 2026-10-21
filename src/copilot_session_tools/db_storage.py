@@ -151,6 +151,8 @@ CREATE TABLE IF NOT EXISTS cst_content_blocks (
     agent_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cst_content_blocks_message ON cst_content_blocks(message_id);
+-- Avoid scanning every content block for each deleted message's SET NULL action.
+CREATE INDEX IF NOT EXISTS idx_cst_content_blocks_child_message ON cst_content_blocks(child_message_id);
 
 CREATE TABLE IF NOT EXISTS cst_root_agent_intervals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

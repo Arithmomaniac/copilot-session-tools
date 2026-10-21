@@ -306,6 +306,33 @@ class TestSessionToHtml:
         assert "System instructions go here" in html
         assert "expand-system-messages" not in html
 
+    @pytest.mark.parametrize("include_system", [False, True])
+    def test_nested_system_messages_respect_content_set(self, sample_session, include_system):
+        system = ChatMessage(role="system", content="Delegated system instructions")
+        assistant = ChatMessage(role="assistant", content="Delegated answer")
+        nested_blocks = [ContentBlock(kind="subagent", description=message.role.title(), content=message.content, child_message=message) for message in (system, assistant)]
+        sample_session.messages[1].content_blocks = [
+            ContentBlock(
+                kind="subagent",
+                content="",
+                description="Delegated task",
+                content_blocks=nested_blocks,
+                child_message=ChatMessage(
+                    role="assistant",
+                    content="",
+                    content_blocks=nested_blocks,
+                ),
+            )
+        ]
+        content_set = {"agent-details"}
+        if include_system:
+            content_set.add("system-messages")
+
+        html = session_to_html(sample_session, content_set=content_set)
+
+        assert (system.content in html) is include_system
+        assert assistant.content in html
+
     def test_auxiliary_sections_are_collapsible_open_by_default(self, session_with_thinking):
         """Representative auxiliary HTML sections render as open-by-default details."""
         html = session_to_html(session_with_thinking, content_set={"agent-details", "thinking", "tools"})
