@@ -75,7 +75,7 @@ class TestScanner:
     def test_scan_chat_sessions(self, mock_workspace_storage):
         """Test scanning for chat sessions."""
         storage_paths = [(str(mock_workspace_storage), "stable")]
-        sessions = list(scan_chat_sessions(storage_paths))
+        sessions = list(scan_chat_sessions(storage_paths, include_cli=False))
 
         assert len(sessions) >= 1
         session = sessions[0]
@@ -1863,6 +1863,163 @@ class TestCLINewEventHandlers:
 
         assert session is not None
         assert session.root_agent_intervals == []
+
+    @pytest.mark.parametrize("root_selected", [False, True])
+    @pytest.mark.parametrize("legacy_parent", [False, True])
+    def test_agent_id_streams_preserve_root_and_nested_messages(self, tmp_path, root_selected, legacy_parent):
+        events = []
+        if root_selected:
+            events.append(
+                {
+                    "type": "subagent.selected",
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "data": {"agentName": "review-pr-comments"},
+                }
+            )
+        events.extend(
+            [
+                {"type": "user.message", "id": "root-user", "timestamp": "2026-01-01T00:00:02Z", "data": {"content": "Review feedback"}},
+                {
+                    "type": "tool.execution_start",
+                    "timestamp": "2026-01-01T00:00:03Z",
+                    "data": {"toolCallId": "task-1", "toolName": "task", "arguments": {"agent_type": "smart-merge"}},
+                },
+                {
+                    "type": "subagent.started",
+                    "agentId": "merge-1",
+                    "timestamp": "2026-01-01T00:00:03Z",
+                    "data": {"toolCallId": "task-1", "agentName": "smart-merge"},
+                },
+                {
+                    "type": "subagent.selected",
+                    "agentId": "merge-1",
+                    "timestamp": "2026-01-01T00:00:04Z",
+                    "data": {"agentName": "smart-merge"},
+                },
+                {
+                    "type": "user.message",
+                    "id": "child-user",
+                    "agentId": "merge-1",
+                    "timestamp": "2026-01-01T00:00:05Z",
+                    "data": {"content": "Merge exact upstream tip"},
+                },
+                {
+                    "type": "tool.execution_start",
+                    "agentId": "merge-1",
+                    "timestamp": "2026-01-01T00:00:06Z",
+                    "data": {"toolCallId": "child-view", "toolName": "view", "arguments": {"path": "README.md"}},
+                },
+                {
+                    "type": "assistant.message",
+                    "id": "child-answer",
+                    "agentId": "merge-1",
+                    "timestamp": "2026-01-01T00:00:07Z",
+                    "data": {"content": "Feature preserved"},
+                },
+                {"type": "subagent.deselected", "agentId": "merge-1", "timestamp": "2026-01-01T00:00:08Z", "data": {}},
+                {
+                    "type": "tool.execution_complete",
+                    "timestamp": "2026-01-01T00:00:09Z",
+                    "data": {"toolCallId": "task-1", "success": True, "result": {"content": "Feature preserved"}},
+                },
+                {
+                    "type": "subagent.completed",
+                    "agentId": "merge-1",
+                    "timestamp": "2026-01-01T00:00:09Z",
+                    "data": {"toolCallId": "task-1"},
+                },
+                {"type": "assistant.message", "id": "root-answer", "timestamp": "2026-01-01T00:00:10Z", "data": {"content": "Review continues"}},
+            ]
+        )
+        if legacy_parent:
+            for event in events:
+                if event.get("agentId") and not event["type"].startswith("subagent."):
+                    event["data"]["parentToolCallId"] = "task-1"
+        session = self._parse(tmp_path, *events)
+        assert session is not None
+        expected = [RootAgentInterval("review-pr-comments", "review-pr-comments", "2026-01-01T00:00:01Z")] if root_selected else []
+        assert session.root_agent_intervals == expected
+        assert [message.content for message in session.messages if message.role == "user"] == ["Review feedback"]
+        block = next(block for message in session.messages for block in message.content_blocks if block.kind == "subagent")
+        assert block.agent_id == "merge-1"
+        assert block.child_message is not None
+        child_messages = block.child_message.children
+        assert [(message.role, message.source_event_id) for message in child_messages] == [
+            ("user", "child-user"),
+            ("assistant", "child-answer"),
+        ]
+        assert all(message.agent_id == "merge-1" and message.agent_nesting_level > 0 for message in child_messages)
+        assert [tool.name for message in child_messages for tool in message.tool_invocations] == ["view"]
+        assert [tool.name for message in session.messages for tool in message.tool_invocations] == ["task"]
+
+    def test_agent_id_lifecycle_without_child_stream_preserves_result(self, tmp_path):
+        session = self._parse(
+            tmp_path,
+            {
+                "type": "tool.execution_start",
+                "data": {"toolCallId": "task-1", "toolName": "task", "arguments": {"agent_type": "explore"}},
+            },
+            {"type": "subagent.started", "agentId": "child-1", "data": {"toolCallId": "task-1"}},
+            {
+                "type": "tool.execution_complete",
+                "data": {"toolCallId": "task-1", "success": True, "result": {"content": "Research complete"}},
+            },
+            {"type": "subagent.completed", "agentId": "child-1", "data": {"toolCallId": "task-1"}},
+        )
+        assert session is not None
+        block = next(block for message in session.messages for block in message.content_blocks if block.kind == "subagent")
+        assert block.agent_id == "child-1"
+        assert block.child_message is not None
+        assert block.child_message.content == "Research complete"
+
+    def test_delegated_streams_share_event_index(self, tmp_path):
+        from copilot_session_tools.scanner.cli import _parse_cli_jsonl_file
+
+        event_reads = 0
+
+        class CountedEvent(dict):
+            def get(self, key, default=None):
+                nonlocal event_reads
+                event_reads += 1
+                return super().get(key, default)
+
+        events = [CountedEvent(type="session.start", data={"sessionId": "fanout-session"})]
+        for i in range(100):
+            agent_id = f"child-{i}"
+            tool_call_id = f"task-{i}"
+            events.extend(
+                [
+                    CountedEvent(type="tool.execution_start", data={"toolCallId": tool_call_id, "toolName": "task", "arguments": {}}),
+                    CountedEvent(type="subagent.started", agentId=agent_id, data={"toolCallId": tool_call_id}),
+                    CountedEvent(type="user.message", agentId=agent_id, data={"content": f"Request {i}"}),
+                    CountedEvent(type="assistant.message", agentId=agent_id, data={"content": f"Answer {i}"}),
+                    CountedEvent(type="subagent.completed", agentId=agent_id, data={"toolCallId": tool_call_id}),
+                ]
+            )
+        source = tmp_path / "events.jsonl"
+        source.write_text("", encoding="utf-8")
+
+        session = _parse_cli_jsonl_file(source, _events=events)
+
+        assert session is not None
+        assert event_reads < 128 * len(events)
+
+    def test_unlinked_agent_stream_retains_nested_prompt_without_inventing_task(self, tmp_path):
+        session = self._parse(
+            tmp_path,
+            {"type": "user.message", "data": {"content": "Run research workflow"}},
+            {"type": "subagent.started", "agentId": "child-1", "data": {"toolCallId": "factory-child", "agentName": "research"}},
+            {"type": "user.message", "id": "child-user", "agentId": "child-1", "data": {"content": "Research one topic"}},
+            {"type": "assistant.message", "id": "child-answer", "agentId": "child-1", "data": {"content": "Research complete"}},
+            {"type": "subagent.completed", "agentId": "child-1", "data": {"toolCallId": "factory-child"}},
+        )
+        assert session is not None
+        assert [message.content for message in session.messages if message.role == "user"] == ["Run research workflow"]
+        assert not any(message.tool_invocations for message in session.messages)
+        block = next(block for message in session.messages for block in message.content_blocks if block.kind == "subagent")
+        assert block.child_message is not None
+        assert block.child_message.children[0].source_event_id == "child-user"
+        assert block.child_message.children[0].agent_id == "child-1"
 
     def test_root_agent_selection_does_not_affect_nested_subagent_handling(self, tmp_path):
         """Root-agent intervals stay separate from spawned task subagent records."""

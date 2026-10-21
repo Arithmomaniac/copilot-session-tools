@@ -28,7 +28,7 @@ except ImportError:
 # Skip all tests in this module if playwright is not installed
 pytestmark = pytest.mark.skipif(not HAS_PLAYWRIGHT, reason="pytest-playwright not installed")
 
-from copilot_session_tools import ChatMessage, ChatSession, Database
+from copilot_session_tools import ChatMessage, ChatSession, ContentBlock, Database
 from copilot_session_tools.web import create_app
 
 
@@ -84,6 +84,37 @@ def test_db():
         vscode_edition="insider",
     )
     db.add_session(session2)
+
+    system = ChatMessage(role="system", content="Delegated system instructions")
+    assistant = ChatMessage(role="assistant", content="Delegated answer")
+    db.add_session(
+        ChatSession(
+            session_id="e2e-nested-system",
+            workspace_name="nested-system-test",
+            workspace_path="/tmp/nested-system-test",
+            messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    content_blocks=[
+                        ContentBlock(
+                            kind="subagent",
+                            content="",
+                            description="Delegated task",
+                            child_message=ChatMessage(
+                                role="assistant",
+                                content="",
+                                content_blocks=[
+                                    ContentBlock(kind="subagent", description=message.role.title(), content=message.content, child_message=message)
+                                    for message in (system, assistant)
+                                ],
+                            ),
+                        )
+                    ],
+                )
+            ],
+        )
+    )
 
     yield db_path
 
@@ -150,6 +181,27 @@ class TestBackLinkNavigation:
         back_link.click()
 
         assert page.url == f"{live_server}/"
+
+
+def test_nested_system_messages_follow_system_toggle(live_server, page):
+    from playwright.sync_api import expect
+
+    page.goto(f"{live_server}/session/e2e-nested-system")
+    page.wait_for_function("window.Alpine && document.querySelector('[x-data]')._x_dataStack")
+    task = page.locator("details.subagent-block").filter(has=page.locator("details.subagent-block")).first
+    if task.get_attribute("open") is None:
+        task.locator(":scope > summary").click()
+    system = task.locator("details.subagent-block").filter(has_text="Delegated system instructions")
+    assistant = task.locator("details.subagent-block").filter(has_text="Delegated answer")
+    expect(system).to_be_hidden()
+    expect(assistant).to_be_visible()
+
+    page.locator(".settings-btn").click()
+    toggle = page.locator("label.settings-toggle").filter(has=page.locator('input[x-model="systemMessages"]'))
+    toggle.click()
+    expect(system).to_be_visible()
+    toggle.click()
+    expect(system).to_be_hidden()
 
 
 class TestWorkspaceFilter:

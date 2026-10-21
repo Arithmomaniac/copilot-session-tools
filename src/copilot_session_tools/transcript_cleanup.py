@@ -111,16 +111,13 @@ def session_needs_cleanup(session: ChatSession, threshold: float = 0.3) -> list[
 # Batch LLM cleanup
 # ---------------------------------------------------------------------------
 
-# GPT-5.4-mini chosen via Artificial Analysis IFBench (instruction following):
-#   gpt-5.4-mini: 0.733 IFBench, 179 tok/s, $1.69/1M
-#   gpt-4o-mini:  not ranked (legacy)
-#   claude-4.5-haiku: 0.543 IFBench — weaker at following cleanup rules
-# IFBench is the most relevant AA metric for transcript cleanup, which
-# requires precise instruction following over raw reasoning ability.
-DEFAULT_MODEL = "github_copilot/gpt-5.4-mini"
+# Gemini 3.8 Flash medium keeps this high-volume structured cleanup role bounded
+# while replacing the retiring Gemini 3.5 default.
+DEFAULT_MODEL = "github_copilot/gemini-3.8-flash"
+DEFAULT_REASONING_EFFORT = "medium"
 
 # Models that require the /responses API (not available on /chat/completions)
-_RESPONSES_ONLY_MODELS = frozenset({"gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"})
+_RESPONSES_ONLY_MODELS = frozenset({"gpt-5.4-mini", "gpt-5.4"})
 
 _SYSTEM_PROMPT = """\
 You are a transcript cleanup assistant for Copilot chat sessions.
@@ -417,6 +414,8 @@ def call_cleanup_llm(
     kwargs: dict = {}
     if not _needs_responses_api(model):
         kwargs["temperature"] = 0.0
+    if model == DEFAULT_MODEL:
+        kwargs["reasoning_effort"] = DEFAULT_REASONING_EFFORT
 
     parsed = _structured_completion(
         model=model,

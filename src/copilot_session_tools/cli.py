@@ -1294,9 +1294,9 @@ def cleanup(
         typer.Option(
             "--model",
             "-m",
-            help="LiteLLM model for cleanup (e.g., github_copilot/gpt-5.4-mini).",
+            help="LiteLLM model for cleanup (e.g., github_copilot/gemini-3.8-flash).",
         ),
-    ] = "github_copilot/gpt-5.4-mini",
+    ] = "github_copilot/gemini-3.8-flash",
     dry_run: Annotated[
         bool,
         typer.Option(

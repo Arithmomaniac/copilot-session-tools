@@ -2,7 +2,9 @@
 
 import html
 import json
+import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -31,6 +33,7 @@ _SESSION_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _FORK_BOUNDARY_PATTERN = re.compile(rf" before event (?P<event_id>{_SESSION_ID_PATTERN})", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 
 def _as_tool_argument_dict(arguments: object) -> dict[str, object]:
@@ -719,7 +722,169 @@ class _CliSessionBuilder:
             self.current_assistant_tool_invocations.append(tool_inv)
 
 
-def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
+@dataclass
+class _CliSessionIndex:
+    events_by_agent: dict[str | None, list[dict]]
+    metadata_events: list[dict]
+    fusion_statuses: dict[str, str]
+    tool_executions: dict
+    subagent_child_tools: dict[str, list[str]]
+    subagent_child_structured: dict[str, list[tuple]]
+    subagent_failures: dict[str, str]
+    subagent_completions: set[str]
+    bg_agent_results: dict[str, str]
+    bg_agent_id_map: dict[str, str]
+    agent_display_names: dict[str, str]
+    root_agent_intervals: list[RootAgentInterval]
+    updated_at: str | None
+
+
+def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
+    tool_executions: dict = {}
+    root_agent_intervals: list[RootAgentInterval] = []
+    active_root_agent: RootAgentInterval | None = None
+    subagent_child_tools: dict[str, list[str]] = {}
+    subagent_child_structured: dict[str, list[tuple]] = {}
+    subagent_failures: dict[str, str] = {}
+    subagent_completions: set[str] = set()
+    subagent_started_ids: set[str] = set()
+    bg_agent_results: dict[str, str] = {}
+    bg_agent_id_map: dict[str, str] = {}
+    agent_display_names: dict[str, str] = {}
+    metadata_events: dict[str, dict] = {}
+    for event in events:
+        event_type = event.get("type", "")
+        event_data = event.get("data", {})
+        timestamp = event.get("timestamp")
+
+        if event_type == "session.start":
+            metadata_events.setdefault("start", event)
+        elif event_type == "session.info":
+            info_type = event_data.get("infoType")
+            message = event_data.get("message", "")
+            if info_type == "folder_trust" and message.startswith("Folder ") and " has been added" in message:
+                metadata_events.setdefault("folder_trust", event)
+            elif info_type == "authentication" and "as user: " in message:
+                metadata_events.setdefault("authentication", event)
+
+        if event_type == "tool.execution_start":
+            tool_call_id = event_data.get("toolCallId")
+            if tool_call_id:
+                if tool_call_id not in tool_executions:
+                    tool_executions[tool_call_id] = {"start": None, "complete": None, "user_requested": False}
+                tool_executions[tool_call_id]["start"] = event
+            parent_tcid = event_data.get("parentToolCallId")
+            if parent_tcid:
+                tool_name = event_data.get("toolName", "")
+                if tool_name not in ("report_intent", "read_agent", "read_powershell", "read_bash", "skill", "task"):
+                    arguments = event_data.get("arguments", {})
+                    display = _format_tool_display_message(tool_name, arguments)
+                    if display:
+                        subagent_child_tools.setdefault(parent_tcid, []).append(display)
+                    subagent_child_structured.setdefault(parent_tcid, []).append((tool_call_id, tool_name, arguments))
+        elif event_type == "tool.user_requested":
+            tool_call_id = event_data.get("toolCallId")
+            if tool_call_id:
+                if tool_call_id not in tool_executions:
+                    tool_executions[tool_call_id] = {"start": None, "complete": None, "user_requested": True}
+                else:
+                    tool_executions[tool_call_id]["user_requested"] = True
+        elif event_type == "tool.execution_complete":
+            tool_call_id = event_data.get("toolCallId")
+            if tool_call_id:
+                if tool_call_id not in tool_executions:
+                    tool_executions[tool_call_id] = {"start": None, "complete": None, "user_requested": False}
+                tool_executions[tool_call_id]["complete"] = event
+                result_obj = event_data.get("result", {})
+                result_content = result_obj.get("content", "") if isinstance(result_obj, dict) else ""
+                if result_content.startswith("Agent started in background with agent_id: "):
+                    bg_id = result_content.split("agent_id: ", 1)[1].split(".")[0].strip()
+                    bg_agent_id_map[tool_call_id] = bg_id
+                    start_info = tool_executions[tool_call_id].get("start")
+                    if start_info:
+                        args = _as_tool_argument_dict(start_info.get("data", {}).get("arguments", {}))
+                        agent_type = _get_tool_arg_str(args, "agent_type", "agent")
+                        desc = _get_tool_arg_str(args, "description")
+                        agent_display_names[bg_id] = f"{agent_type}: {desc}" if desc else agent_type
+                start_info = tool_executions[tool_call_id].get("start")
+                if start_info and start_info.get("data", {}).get("toolName") == "read_agent" and isinstance(result_obj, dict):
+                    detailed = result_obj.get("detailedContent", "")
+                    result_from_content = result_content.split("Result:\n", 1)[-1].strip() if "Result:\n" in result_content else ""
+                    best = result_from_content if len(result_from_content) > len(detailed) else detailed
+                    if best:
+                        args = _as_tool_argument_dict(start_info["data"].get("arguments", {}))
+                        agent_id = str(args.get("agent_id", ""))
+                        if len(best) > len(bg_agent_results.get(agent_id, "")):
+                            bg_agent_results[agent_id] = best
+        elif event_type == "subagent.failed":
+            tool_call_id = event_data.get("toolCallId", "")
+            if tool_call_id:
+                subagent_failures[tool_call_id] = event_data.get("error") or ""
+        elif event_type == "subagent.started":
+            tool_call_id = event_data.get("toolCallId", "")
+            if tool_call_id:
+                subagent_started_ids.add(tool_call_id)
+        elif event_type == "subagent.completed":
+            tool_call_id = event_data.get("toolCallId", "")
+            if tool_call_id:
+                subagent_completions.add(tool_call_id)
+        elif event_type == "subagent.selected":
+            if timestamp is None or event.get("agentId"):
+                continue
+            if active_root_agent is not None:
+                active_root_agent.end_timestamp = timestamp
+                root_agent_intervals.append(active_root_agent)
+            agent_name = event_data.get("agentName") or event_data.get("agentDisplayName") or "unknown"
+            tools = event_data.get("tools")
+            active_root_agent = RootAgentInterval(
+                agent_name=agent_name,
+                agent_display_name=event_data.get("agentDisplayName") or agent_name,
+                start_timestamp=timestamp,
+                tools=tools if isinstance(tools, list) else None,
+            )
+        elif event_type == "subagent.deselected":
+            if not event.get("agentId") and active_root_agent is not None:
+                active_root_agent.end_timestamp = timestamp
+                root_agent_intervals.append(active_root_agent)
+                active_root_agent = None
+    if active_root_agent is not None:
+        root_agent_intervals.append(active_root_agent)
+    for tcid in subagent_started_ids:
+        if tcid not in subagent_completions and tcid not in subagent_failures and tool_executions.get(tcid, {}).get("complete") is not None:
+            subagent_completions.add(tcid)
+
+    events_by_agent: dict[str | None, list[dict]] = {}
+    for event in events:
+        owner = event.get("agentId") or None
+        if event.get("type") in ("subagent.started", "subagent.completed", "subagent.failed"):
+            execution = tool_executions.get(event.get("data", {}).get("toolCallId"), {})
+            owner = (execution.get("start") or {}).get("agentId") or None
+        events_by_agent.setdefault(owner, []).append(event)
+    return _CliSessionIndex(
+        events_by_agent=events_by_agent,
+        metadata_events=list(metadata_events.values()),
+        fusion_statuses=_build_fusion_statuses(events),
+        tool_executions=tool_executions,
+        subagent_child_tools=subagent_child_tools,
+        subagent_child_structured=subagent_child_structured,
+        subagent_failures=subagent_failures,
+        subagent_completions=subagent_completions,
+        bg_agent_results=bg_agent_results,
+        bg_agent_id_map=bg_agent_id_map,
+        agent_display_names=agent_display_names,
+        root_agent_intervals=root_agent_intervals,
+        updated_at=events[-1].get("timestamp"),
+    )
+
+
+def _parse_cli_jsonl_file(
+    file_path: Path,
+    *,
+    _events: list[dict] | None = None,
+    _agent_id: str | None = None,
+    _agent_nesting_level: int = 0,
+    _index: _CliSessionIndex | None = None,
+) -> ChatSession | None:
     """Parse a GitHub Copilot CLI JSONL session file.
 
     CLI sessions are stored as JSONL (JSON Lines) where each line is a JSON object
@@ -749,24 +914,24 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         ChatSession object or None if parsing fails.
     """
     try:
-        events = []
-
-        with file_path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    data = ssrjson.loads(line)
-                    events.append(data)
-                except ssrjson.JSONDecodeError:
-                    continue
-
-        if not events:
-            return None
-
-        fusion_statuses = _build_fusion_statuses(events)
+        if _index is None:
+            events = _events
+            if events is None:
+                events = []
+                with file_path.open(encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            events.append(ssrjson.loads(line))
+                        except ssrjson.JSONDecodeError:
+                            continue
+            if not events:
+                return None
+            _index = _index_cli_events(events)
+        events = _index.events_by_agent.get(_agent_id, [])
+        fusion_statuses = _index.fusion_statuses
 
         # Extract session metadata from session.start event
         session_id = None
@@ -774,7 +939,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         session_start_context: dict = {}
         session_title_from_event: str | None = None
 
-        for event in events:
+        for event in _index.metadata_events:
             event_type = event.get("type", "")
             event_data = event.get("data", {})
 
@@ -796,7 +961,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         requester_username = None
         session_repository = session_start_context.get("repository")  # e.g. "owner/repo"
 
-        for event in events:
+        for event in _index.metadata_events:
             if event.get("type") == "session.info":
                 event_data = event.get("data", {})
                 info_type = event_data.get("infoType")
@@ -831,158 +996,19 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
             source="initial",
         )
 
-        # Build tool execution map: toolCallId -> (start_data, complete_data, user_requested)
-        tool_executions: dict = {}
-        root_agent_intervals: list[RootAgentInterval] = []
-        active_root_agent: RootAgentInterval | None = None
-        # Map parent agent toolCallId -> list of child tool display names
-        subagent_child_tools: dict[str, list[str]] = {}
-        # Map parent agent toolCallId -> list of (ToolInvocation | None, CommandRun | None, content_blocks)
-        subagent_child_structured: dict[str, list[tuple]] = {}
-        # Track which subagents failed (toolCallId -> error message)
-        subagent_failures: dict[str, str] = {}
-        # Track which subagents completed successfully
-        subagent_completions: set[str] = set()
-        # Track all subagent.started toolCallIds (for inferring completion)
-        subagent_started_ids: set[str] = set()
-        # Map agent-N -> best result text from read_agent (for background agents)
-        bg_agent_results: dict[str, str] = {}
-        # Map task toolCallId -> agent-N id (parsed from background placeholder)
-        bg_agent_id_map: dict[str, str] = {}
-        # Map agent-N -> display title (e.g., "Explore Agent: Find auth")
-        agent_display_names: dict[str, str] = {}
-        for event in events:
-            event_type = event.get("type", "")
-            event_data = event.get("data", {})
-            timestamp = event.get("timestamp")
-
-            if event_type == "tool.execution_start":
-                tool_call_id = event_data.get("toolCallId")
-                if tool_call_id:
-                    if tool_call_id not in tool_executions:
-                        tool_executions[tool_call_id] = {"start": None, "complete": None, "user_requested": False}
-                    tool_executions[tool_call_id]["start"] = event
-                # Track child tools of subagents
-                parent_tcid = event_data.get("parentToolCallId")
-                if parent_tcid:
-                    tool_name = event_data.get("toolName", "")
-                    # Skip internal/meta tools from child tool display
-                    if tool_name not in ("report_intent", "read_agent", "read_powershell", "read_bash", "skill", "task"):
-                        arguments = event_data.get("arguments", {})
-                        display = _format_tool_display_message(tool_name, arguments)
-                        if display:
-                            subagent_child_tools.setdefault(parent_tcid, []).append(display)
-                        # Also store structured data for child tool (toolCallId, toolName, arguments)
-                        subagent_child_structured.setdefault(parent_tcid, []).append((tool_call_id, tool_name, arguments))
-
-            elif event_type == "tool.user_requested":
-                # User explicitly requested this tool execution
-                tool_call_id = event_data.get("toolCallId")
-                if tool_call_id:
-                    if tool_call_id not in tool_executions:
-                        tool_executions[tool_call_id] = {"start": None, "complete": None, "user_requested": True}
-                    else:
-                        tool_executions[tool_call_id]["user_requested"] = True
-
-            elif event_type == "tool.execution_complete":
-                tool_call_id = event_data.get("toolCallId")
-                if tool_call_id:
-                    if tool_call_id not in tool_executions:
-                        tool_executions[tool_call_id] = {"start": None, "complete": None, "user_requested": False}
-                    tool_executions[tool_call_id]["complete"] = event
-                    # Map task toolCallId -> agent_id from background placeholder
-                    result_obj = event_data.get("result", {})
-                    result_content = result_obj.get("content", "") if isinstance(result_obj, dict) else ""
-                    if result_content.startswith("Agent started in background with agent_id: "):
-                        bg_id = result_content.split("agent_id: ", 1)[1].split(".")[0].strip()
-                        bg_agent_id_map[tool_call_id] = bg_id
-                        # Build display name from task tool arguments
-                        start_info = tool_executions[tool_call_id].get("start")
-                        if start_info:
-                            args = _as_tool_argument_dict(start_info.get("data", {}).get("arguments", {}))
-                            agent_type = _get_tool_arg_str(args, "agent_type", "agent")
-                            desc = _get_tool_arg_str(args, "description")
-                            agent_display_names[bg_id] = f"{agent_type}: {desc}" if desc else agent_type
-                    # Collect read_agent results for background agents
-                    start_info = tool_executions[tool_call_id].get("start")
-                    if start_info and start_info.get("data", {}).get("toolName") == "read_agent" and isinstance(result_obj, dict):
-                        content = result_content
-                        detailed = result_obj.get("detailedContent", "")
-                        # Extract result text from content after "Result:\n" header
-                        result_from_content = ""
-                        if content and "Result:\n" in content:
-                            result_from_content = content.split("Result:\n", 1)[-1].strip()
-                        # Use the longer of content-after-Result vs detailedContent
-                        best = result_from_content if len(result_from_content) > len(detailed) else detailed
-                        if best:
-                            args = _as_tool_argument_dict(start_info["data"].get("arguments", {}))
-                            agent_id = str(args.get("agent_id", ""))
-                            # Only keep the best (longest) result per agent
-                            if len(best) > len(bg_agent_results.get(agent_id, "")):
-                                bg_agent_results[agent_id] = best
-
-            elif event_type == "subagent.failed":
-                tool_call_id = event_data.get("toolCallId", "")
-                error = event_data.get("error") or ""
-                if tool_call_id:
-                    subagent_failures[tool_call_id] = error
-
-            elif event_type == "subagent.started":
-                tool_call_id = event_data.get("toolCallId", "")
-                if tool_call_id:
-                    subagent_started_ids.add(tool_call_id)
-
-            elif event_type == "subagent.completed":
-                tool_call_id = event_data.get("toolCallId", "")
-                if tool_call_id:
-                    subagent_completions.add(tool_call_id)
-
-            elif event_type == "subagent.selected":
-                if timestamp is None:
-                    continue
-                if active_root_agent is not None:
-                    active_root_agent.end_timestamp = timestamp
-                    root_agent_intervals.append(active_root_agent)
-                agent_name = event_data.get("agentName") or event_data.get("agentDisplayName") or "unknown"
-                agent_display_name = event_data.get("agentDisplayName") or agent_name
-                tools = event_data.get("tools")
-                active_root_agent = RootAgentInterval(
-                    agent_name=agent_name,
-                    agent_display_name=agent_display_name,
-                    start_timestamp=timestamp,
-                    tools=tools if isinstance(tools, list) else None,
-                )
-
-            elif event_type == "subagent.deselected":
-                if active_root_agent is not None:
-                    active_root_agent.end_timestamp = timestamp
-                    root_agent_intervals.append(active_root_agent)
-                    active_root_agent = None
-
-        if active_root_agent is not None:
-            root_agent_intervals.append(active_root_agent)
-
-        # Infer subagent completion from tool.execution_complete when no
-        # explicit subagent.completed event was emitted (common in older CLI versions)
-        for tcid in subagent_started_ids:
-            if tcid not in subagent_completions and tcid not in subagent_failures:
-                exec_info = tool_executions.get(tcid, {})
-                if exec_info.get("complete") is not None:
-                    subagent_completions.add(tcid)
-
         # Build messages using VSCode-style rendering:
         # - Process events in order
         # - Combine consecutive assistant messages
         # - Interleave tool invocations inline with content
         builder = _CliSessionBuilder(
-            tool_executions,
-            subagent_child_tools,
-            subagent_failures,
-            bg_agent_results,
-            bg_agent_id_map,
-            subagent_completions,
-            subagent_child_structured,
-            agent_display_names,
+            _index.tool_executions,
+            _index.subagent_child_tools,
+            _index.subagent_failures,
+            _index.bg_agent_results,
+            _index.bg_agent_id_map,
+            _index.subagent_completions,
+            _index.subagent_child_structured,
+            _index.agent_display_names,
         )
 
         for event in events:
@@ -990,8 +1016,8 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
             event_data = event.get("data", {})
             timestamp = event.get("timestamp")
 
-            # Skip events belonging to a subagent — they have parentToolCallId
-            if event_data.get("parentToolCallId"):
+            # Legacy child events without agent identity are rendered by the caller.
+            if event_data.get("parentToolCallId") and _agent_id is None:
                 continue
 
             if event_type == "user.message":
@@ -1293,14 +1319,44 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                     role="assistant",
                     content=content,
                     agent_display_name=title,
-                    # TODO: For multi-level nesting, derive from parent's nesting level
-                    agent_nesting_level=1,
+                    agent_nesting_level=_agent_nesting_level + 1,
                     source_event_id=builder.current_assistant_source_event_id,
                     tool_invocations=nested_tool_invocations,
                     command_runs=nested_command_runs,
                     content_blocks=nested_blocks,
                     file_changes=nested_consolidated_changes,
                 )
+
+                stream_agent_id = event.get("agentId")
+                if stream_agent_id and stream_agent_id != _agent_id:
+                    child_session = _parse_cli_jsonl_file(
+                        file_path,
+                        _index=_index,
+                        _agent_id=stream_agent_id,
+                        _agent_nesting_level=_agent_nesting_level + 2,
+                    )
+                    if child_session is None:
+                        logger.error("Failed to parse delegated agent stream %s in %s", stream_agent_id, file_path)
+                        return None
+                    if child_session.messages:
+                        child_msg = ChatMessage(
+                            role="assistant",
+                            content="",
+                            timestamp=timestamp,
+                            source_event_id=event.get("id"),
+                            agent_id=stream_agent_id,
+                            agent_display_name=title,
+                            agent_nesting_level=_agent_nesting_level + 1,
+                            children=child_session.messages,
+                            content_blocks=[
+                                ContentBlock(kind="subagent", content=message.content, description=message.role.title(), child_message=message)
+                                for message in child_session.messages
+                            ],
+                        )
+                        nested_blocks = child_msg.content_blocks
+                        nested_tool_invocations = []
+                        nested_command_runs = []
+                        nested_consolidated_changes = []
 
                 block = ContentBlock(
                     kind=kind,
@@ -1309,7 +1365,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
                     child_message=child_msg,
                     prompt=_get_tool_arg_str(req_args, "prompt"),
                     is_background=is_bg,
-                    agent_id=bg_id if is_bg else "",
+                    agent_id=stream_agent_id or (bg_id if is_bg else ""),
                 )
                 # Also set deprecated fields for backward compat during transition
                 block.content_blocks = nested_blocks
@@ -1575,7 +1631,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         builder.flush_assistant_message()
 
         messages = builder.messages
-        if not messages:
+        if not messages and _agent_id is None:
             return None
 
         # Post-process: collect shell IO entries and attach to parent CommandRun
@@ -1635,7 +1691,7 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
         source_file_mtime, source_file_size = _get_file_metadata(file_path)
 
         # Get updated_at from last event timestamp
-        updated_at = events[-1].get("timestamp") if events else None
+        updated_at = _index.updated_at
 
         # Determine session title: prefer session.title_changed event, then workspace.yaml, then first intent
         custom_title = None
@@ -1671,9 +1727,12 @@ def _parse_cli_jsonl_file(file_path: Path) -> ChatSession | None:
             source_file_size=source_file_size,
             type="cli",
             repository_url=repository_url,
-            root_agent_intervals=root_agent_intervals,
+            root_agent_intervals=_index.root_agent_intervals if _agent_id is None else [],
             context_entries=context_entries,
         )
+        for message in messages:
+            message.agent_id = _agent_id
+            message.agent_nesting_level = _agent_nesting_level
         session.parser_version = PARSER_VERSION
         return session
     except (OSError, Exception):
