@@ -1963,6 +1963,33 @@ class TestFTS5SpecialCharacterEscaping:
         assert len(results) > 0
 
     @pytest.mark.parametrize(
+        ("query", "expected_indices"),
+        [
+            ('"hello wor"*', [0, 1]),
+            ('^"hello world"', [0]),
+            ('^"hello wor"*', [0]),
+            ('"hello wor" *', [0, 1]),
+            ("hel *", [0, 1]),
+        ],
+    )
+    def test_phrase_and_separated_search_operators(self, temp_db, query, expected_indices):
+        messages = [
+            ChatMessage(role="user", content="hello world"),
+            ChatMessage(role="user", content="say hello world"),
+        ]
+        session = ChatSession(
+            session_id="phrase-operators",
+            workspace_name="test-project",
+            workspace_path="/test",
+            messages=messages,
+        )
+        temp_db.add_session(session)
+
+        results = temp_db.search(query)
+
+        assert {result["content"] for result in results} == {messages[index].content for index in expected_indices}
+
+    @pytest.mark.parametrize(
         ("query", "expected"),
         [
             ("foo.py", '"foo.py"'),
@@ -1973,6 +2000,8 @@ class TestFTS5SpecialCharacterEscaping:
             ('"exact phrase"', '"exact phrase"'),
             ("naïve", "naïve"),
             ("*", '"*"'),
+            ("^", '"^"'),
+            ('""*', '"*"'),
         ],
     )
     def test_fts_query_escaping(self, query, expected):

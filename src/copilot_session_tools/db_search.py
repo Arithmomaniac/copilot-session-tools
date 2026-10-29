@@ -178,14 +178,13 @@ def parse_search_query(query: str) -> ParsedQuery:
         # Pattern to match quoted strings or individual words
         token_pattern = r'"[^"]*"|[^\s"]+'
 
-        for match in re.finditer(token_pattern, remaining_query):
-            token = match.group(0)
-            # Clean up any empty quotes
-            if token == '""':
-                continue
+        query_tokens = [token for token in re.findall(token_pattern, remaining_query) if token != '""']
+        for index, token in enumerate(query_tokens):
             raw_tokens.append(token[1:-1] if len(token) >= 2 and token.startswith('"') and token.endswith('"') else token)
             # Escape FTS5 special characters in the token
-            escaped_token = _escape_fts5_token(token)
+            # Quoted phrases and whitespace can separate operators from their operands.
+            is_operator = (token == "^" and index + 1 < len(query_tokens)) or (token == "*" and index > 0)
+            escaped_token = token if is_operator else _escape_fts5_token(token)
             tokens.append(escaped_token)
 
         # Join tokens with space (FTS5 uses implicit AND)
