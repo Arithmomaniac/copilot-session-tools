@@ -121,6 +121,19 @@ class TestCLI:
         # Should find results
         assert "CLI test" in result.output or "result" in result.output.lower()
 
+    @pytest.mark.parametrize(
+        ("query", "expected_match"),
+        [
+            ('"CLI te"*', True),
+            ('^"from CLI"', False),
+        ],
+    )
+    def test_search_quoted_phrase_operators(self, runner, temp_db_with_data, query, expected_match):
+        result = runner.invoke(app, ["search", "--db", str(temp_db_with_data), query])
+
+        assert result.exit_code == 0
+        assert ("cli-workspace" in result.output) is expected_match
+
     def test_search_unknown_source_has_friendly_error(self, runner, temp_db_with_data):
         result = runner.invoke(
             app,
