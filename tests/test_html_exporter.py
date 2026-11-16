@@ -1,5 +1,7 @@
 """Tests for the HTML exporter module."""
 
+import json
+
 import pytest
 
 from copilot_session_tools import (
@@ -28,6 +30,130 @@ def sample_session():
         updated_at="1700001000000",
         vscode_edition="stable",
     )
+
+
+def test_delegated_prompt_preserves_literal_tags():
+    prompt = "Compare List<TRequest> with `List<TRequest>` and **preserve formatting**."
+    user_message = ChatMessage(role="user", content=prompt)
+    session = ChatSession(
+        session_id="workflow-prompt",
+        workspace_name="test",
+        workspace_path="/test",
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="",
+                content_blocks=[
+                    ContentBlock(
+                        kind="subagent",
+                        content="",
+                        prompt=prompt,
+                        content_blocks=[ContentBlock(kind="subagent", content=prompt, child_message=user_message)],
+                    )
+                ],
+            )
+        ],
+    )
+
+    html = session_to_html(session)
+
+    assert "<TRequest>" not in html
+    assert html.count("<code>List&lt;TRequest&gt;</code>") == 2
+    assert html.count("<strong>preserve formatting</strong>") == 2
+
+
+@pytest.mark.parametrize("renderer", ["static", "web"])
+def test_workflow_readable_presentation(tmp_path, renderer):
+    from copilot_session_tools.database import Database
+    from copilot_session_tools.web.webapp import create_app
+
+    run_id = "3c4a955e-7adb-4b54-97bc-5f4ea4132326"
+    label = f"summaries-{'a' * 64} · workflow {run_id}"
+    result = {"summaries": [{"id": "article-1", "sentences": ["Readable <TRequest> output"], "sourceUrls": ["https://example.com/article"]}]}
+    diagnostic = "Hook failed: agentStop - Error: diagnostic details"
+    retry_guidance = "Preserve the result | inspect before resuming"
+    model = {"resolved": "test-model"}
+    notification = {
+        "type": "workflow_completed",
+        "workflowName": "review",
+        "runId": run_id,
+        "status": "error",
+        "attempt": 2,
+        "elapsedMs": 12500,
+        "consumedSubagents": 4,
+        "consumedNanoAiu": 1250000000,
+        "retryGuidance": retry_guidance,
+    }
+    run_detail = {
+        "runId": run_id,
+        "status": "error",
+        "error": "A worker failed",
+        "agents": [{"agentId": "worker-1", "status": "completed", "activeMs": 12000, "model": model}],
+    }
+    message = ChatMessage(role="assistant", content=json.dumps(result))
+    worker = ChatMessage(
+        role="assistant",
+        content="",
+        children=[message],
+        content_blocks=[ContentBlock(kind="subagent", description="Assistant", content=message.content, child_message=message)],
+    )
+    session = ChatSession(
+        session_id="readable-workflow",
+        workspace_name="test",
+        workspace_path="/test",
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="",
+                content_blocks=[
+                    ContentBlock(kind="status", content=diagnostic, description="hook-error"),
+                    ContentBlock(
+                        kind="subagent",
+                        content="",
+                        description=label,
+                        agent_id="worker-1",
+                        is_background=True,
+                        prompt="Compare <TRequest> types",
+                        child_message=worker,
+                        content_blocks=worker.content_blocks,
+                    ),
+                    ContentBlock(kind="status", description="workflow", content=json.dumps(notification)),
+                    ContentBlock(kind="toolInvocation", content="Workflows: inspect-run"),
+                ],
+                tool_invocations=[
+                    ToolInvocation(
+                        name="dynamic_workflows_manage",
+                        input=json.dumps({"operation": "inspect-run", "runId": run_id}),
+                        result=f'Workflow "review" run {run_id} has terminal status error. Full run result: {json.dumps(run_detail)}',
+                    )
+                ],
+            )
+        ],
+    )
+    if renderer == "web":
+        database = Database(str(tmp_path / "viewer.db"))
+        database.add_session(session)
+        app = create_app(str(database.db_path), storage_paths=[])
+        with app.test_client() as client:
+            html = client.get(f"/session/{session.session_id}").get_data(as_text=True)
+    else:
+        html = session_to_html(session)
+
+    assert f'title="{label}"' in html
+    assert "Summaries · aaaaaaaa" in html
+    assert f'title="{run_id}"' in html
+    assert f"run {run_id[:8]}" in html
+    assert 'class="structured-result"' in html
+    assert "Readable &lt;TRequest&gt; output" in html
+    assert "View original JSON" not in html
+    assert 'class="diagnostic-block"' in html
+    assert "Hook failed: agentStop</span>" in html
+    assert diagnostic in html
+    assert 'class="workflow-status"' in html
+    assert retry_guidance in html
+    assert "12.5s" in html
+    assert 'class="workflow-agents"' in html
+    assert model["resolved"] in html
 
 
 @pytest.fixture

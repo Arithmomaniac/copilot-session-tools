@@ -2471,6 +2471,194 @@ class TestCLINewEventHandlers:
         assert self._find_status_blocks(session, "hook-progress")[0].content == "Hook progress: Running postToolUse hook"
         assert self._find_status_blocks(session, "hook-error")[0].content == "Hook failed: postToolUse - blocked"
 
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments", "expected"),
+        [
+            ("run_dynamic_workflow", {"name": "review"}, "Running workflow: review"),
+            ("run_dynamic_workflow", {"resumeFromRunId": "run-1"}, "Resuming workflow: run-1"),
+            ("dynamic_workflows_manage", {"operation": "author", "meta": {"name": "review"}}, "Workflows: author review"),
+            ("dynamic_workflows_manage", {"operation": "inspect-run", "runId": "run-1"}, "Workflows: inspect-run run-1"),
+        ],
+    )
+    def test_workflow_tool_labels(self, tmp_path, tool_name, arguments, expected):
+        session = self._parse(tmp_path, {"type": "tool.execution_start", "data": {"toolCallId": "run-tool", "toolName": tool_name, "arguments": arguments}})
+        assert session.messages[0].tool_invocations[0].invocation_message == expected
+
+    def test_workflow_agent_identity_and_nested_parent(self, tmp_path):
+        from copilot_session_tools.database import Database
+        from copilot_session_tools.html_exporter import session_to_html
+        from copilot_session_tools.markdown_exporter import session_to_markdown
+
+        run_id = "workflow-run-1"
+        prompt = "Research the first topic"
+        answer = "Verified the topic"
+        session = self._parse(
+            tmp_path,
+            {"type": "user.message", "data": {"content": "Run research"}},
+            {
+                "type": "subagent.started",
+                "agentId": "worker-stream",
+                "data": {"toolCallId": "worker-task", "agentDisplayName": "Researcher", "workflowRunId": run_id, "executionMode": "background"},
+            },
+            {"type": "user.message", "agentId": "worker-stream", "data": {"content": prompt}},
+            {
+                "type": "subagent.started",
+                "agentId": "nested-stream",
+                "data": {"toolCallId": "nested-task", "parentId": "worker-task", "agentDisplayName": "Verifier", "executionMode": "sync"},
+            },
+            {"type": "assistant.message", "agentId": "nested-stream", "data": {"content": answer}},
+            {"type": "subagent.completed", "agentId": "nested-stream", "data": {"toolCallId": "nested-task"}},
+            {"type": "subagent.completed", "agentId": "worker-stream", "data": {"toolCallId": "worker-task"}},
+        )
+        root_blocks = [block for message in session.messages for block in message.content_blocks if block.kind == "subagent"]
+        assert [block.agent_id for block in root_blocks] == ["worker-stream"]
+        worker = root_blocks[0]
+        assert worker.is_background
+        assert worker.prompt == prompt
+        assert run_id in worker.description
+        nested = next(block for message in worker.child_message.children for block in message.content_blocks if block.kind == "subagent")
+        assert not nested.is_background
+        assert nested.child_message.children[0].content == answer
+        db = Database(str(tmp_path / "workflow.db"))
+        db.add_session(session)
+        loaded = db.get_session(session.session_id)
+        assert loaded is not None
+        markdown = session_to_markdown(loaded, content_set={"agent-details", "tools"})
+        html = session_to_html(loaded)
+        assert answer in markdown and prompt in markdown
+        assert answer in html and run_id in html
+
+    def test_workflow_notification_uses_structured_terminal_result(self, tmp_path):
+        notification = {
+            "type": "workflow_completed",
+            "workflowName": "review",
+            "runId": "run-1",
+            "status": "error",
+            "consumedSubagents": 4,
+            "consumedNanoAiu": 1_250_000_000,
+            "elapsedMs": 12500,
+            "attempt": 2,
+            "resultPreview": "\x1b[31mNeeds changes\x1b[0m",
+        }
+        session = self._parse(tmp_path, {"type": "system.notification", "data": {"kind": notification}})
+        block = self._find_status_blocks(session, "workflow")[0]
+        assert json.loads(block.content) == notification
+        from copilot_session_tools.database import Database
+        from copilot_session_tools.html_exporter import session_to_html
+        from copilot_session_tools.markdown_exporter import session_to_markdown
+
+        database = Database(str(tmp_path / "workflow-status.db"))
+        database.add_session(session)
+        loaded = database.get_session(session.session_id)
+        assert loaded is not None
+        assert json.loads(self._find_status_blocks(loaded, "workflow")[0].content) == notification
+        markdown = session_to_markdown(loaded)
+        html = session_to_html(loaded)
+        assert "Workflow review (run-1): error | 4 subagents | 1.25 AI credits | attempt 2 | 12.5s active | Needs changes" in markdown
+        assert "\x1b" not in markdown
+        assert 'class="workflow-status"' in html
+        assert "12.5s" in html
+
+    @pytest.mark.parametrize("approved", [True, False])
+    def test_typed_plan_review_preserves_plan_and_decision(self, tmp_path, approved):
+        response = {
+            "responseKind": "exit_plan_mode",
+            "summary": "Change the scanner",
+            "planContent": "## Plan\n\nPreserve archived workflow agents.",
+            "approved": approved,
+            "selectedAction": "interactive" if approved else None,
+            "feedback": "Keep the tests focused",
+        }
+        session = self._parse(tmp_path, {"id": "review-event", "type": "human_response.recorded", "data": {"requestId": "review", "response": response}})
+        block = session.messages[0].content_blocks[0]
+        assert block.kind == "ask_user"
+        assert block.description == "plan-review"
+        assert ("Plan approved" if approved else "Plan rejected") in block.content
+        assert all(response[key] in block.content for key in ("summary", "planContent", "feedback"))
+        assert session.messages[0].source_event_id == "review-event"
+
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            ({"responseKind": "ask_user", "message": "Choose scope", "content": {"scope": "scanner"}}, "scope=scanner"),
+            ({"responseKind": "ask_user", "message": "Choose scope", "content": {}, "action": "cancel"}, "cancel"),
+            ({"responseKind": "user_input", "question": "Continue?", "answer": "yes"}, "yes"),
+            ({"responseKind": "user_input", "question": "Continue?", "answer": "", "dismissed": True}, "dismissed"),
+        ],
+    )
+    def test_typed_question_fallback(self, tmp_path, response, expected):
+        session = self._parse(tmp_path, {"type": "human_response.recorded", "data": {"requestId": "question", "response": response}})
+        assert expected in session.messages[0].content_blocks[0].content
+
+    def test_typed_question_does_not_duplicate_legacy_rendering(self, tmp_path):
+        question = "Continue?"
+        session = self._parse(
+            tmp_path,
+            {"type": "tool.execution_start", "data": {"toolCallId": "ask", "toolName": "ask_user", "arguments": {"message": question}}},
+            {"type": "tool.execution_complete", "data": {"toolCallId": "ask", "success": True, "result": {"content": "yes"}}},
+            {
+                "type": "human_response.recorded",
+                "data": {"requestId": "q", "toolCallId": "ask", "response": {"responseKind": "ask_user", "message": question, "content": {"answer": "yes"}}},
+            },
+            {"type": "user_input.requested", "data": {"requestId": "q2", "question": question}},
+            {"type": "user_input.completed", "data": {"requestId": "q2", "answer": "yes"}},
+            {"type": "human_response.recorded", "data": {"requestId": "q2", "response": {"responseKind": "user_input", "question": question, "answer": "yes"}}},
+        )
+        assert len([block for message in session.messages for block in message.content_blocks if block.kind == "ask_user"]) == 2
+
+    def test_typed_question_retains_answer_when_legacy_completion_is_missing(self, tmp_path):
+        response = {"responseKind": "user_input", "question": "Continue?", "answer": "yes"}
+        session = self._parse(
+            tmp_path,
+            {"type": "user_input.requested", "data": {"requestId": "q", "question": response["question"]}},
+            {"type": "human_response.recorded", "data": {"requestId": "q", "response": response}},
+        )
+        assert any(response["answer"] in block.content for message in session.messages for block in message.content_blocks)
+
+    def test_partial_plan_response_does_not_infer_a_decision(self, tmp_path):
+        session = self._parse(tmp_path, {"type": "human_response.recorded", "data": {"response": {"responseKind": "exit_plan_mode", "summary": "Proposed work"}}})
+        assert "decision unavailable" in session.messages[0].content_blocks[0].content
+
+    @pytest.mark.parametrize(
+        ("event_type", "data", "expected"),
+        [
+            ("mcp.oauth_recovery_completed", {"serverName": "enghub", "outcome": "succeeded"}, "MCP OAuth recovery: enghub - succeeded"),
+            ("session.permission_recovery", {"status": "recovering", "reason": "\x1b[31mpermission_required\x1b[0m"}, "Permission recovery: recovering - permission_required"),
+            ("program.permission_requested", {"permissionRequest": {"kind": "shell", "command": "python --version"}}, "Permission requested: shell - python --version"),
+        ],
+    )
+    def test_recovery_and_program_permission_status(self, tmp_path, event_type, data, expected):
+        session = self._parse(tmp_path, {"type": event_type, "data": data})
+        assert session.messages[0].content_blocks[0].content == expected
+
+    def test_program_tool_events_reuse_results_and_survive_export(self, tmp_path):
+        from copilot_session_tools.database import Database
+        from copilot_session_tools.html_exporter import session_to_html
+        from copilot_session_tools.markdown_exporter import session_to_markdown
+
+        command = "python --version"
+        result = "Python 3.12.10"
+        session = self._parse(
+            tmp_path,
+            {"type": "program.execution", "data": {"toolCallId": "program", "entry": {"internal": "never render this"}}},
+            {
+                "type": "program.tool_execution_start",
+                "data": {"programToolCallId": "program", "toolCallId": "shell", "toolName": "powershell", "arguments": {"command": command}},
+            },
+            {"type": "program.tool_execution_complete", "data": {"programToolCallId": "program", "toolCallId": "shell", "success": True, "result": {"content": result}}},
+        )
+        assert session is not None
+        db = Database(str(tmp_path / "archive.db"))
+        db.add_session(session)
+        loaded = db.get_session(session.session_id)
+        assert loaded is not None
+        assert loaded.messages[0].command_runs[0].output == result
+        markdown = session_to_markdown(loaded, content_set={"tools", "commands", "tool-inputs"})
+        html = session_to_html(loaded)
+        assert command in markdown
+        assert command in html and result in html
+        assert "never render this" not in markdown
+
     def test_status_event_payloads_strip_ansi_codes(self, tmp_path):
         """Runtime status payloads can contain terminal output with ANSI escapes."""
         session = self._parse(
@@ -2481,6 +2669,61 @@ class TestCLINewEventHandlers:
 
         assert session is not None
         assert self._find_status_blocks(session, "hook-error")[0].content == "Hook failed: postToolUse - blocked"
+
+
+class TestCLIJournal:
+    @staticmethod
+    def _write(path, *events):
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _link(previous, *, session_id="journal-session", version=1):
+        return {"type": "session.journal_link", "data": {"version": version, "sessionId": session_id, "previousFile": previous}}
+
+    def test_linked_history_uses_originals_not_replay_checkpoints(self, tmp_path):
+        from copilot_session_tools.scanner import _parse_cli_jsonl_file
+
+        start: dict = {"type": "session.start", "data": {"sessionId": "journal-session"}}
+        user: dict = {"id": "original-user", "type": "user.message", "data": {"content": "Original request"}}
+        first_answer: dict = {"id": "first-answer", "type": "assistant.message", "data": {"content": "First answer"}}
+        continuation: dict = {"id": "continued-user", "type": "user.message", "data": {"content": "Continue"}}
+        final_answer: dict = {"id": "last-answer", "type": "assistant.message", "data": {"content": "Final answer"}}
+        self._write(tmp_path / "events.1.jsonl", start, user, first_answer)
+        self._write(tmp_path / "events.2.jsonl", self._link("events.1.jsonl"), {**start, "checkpoint": True}, {**first_answer, "checkpoint": True}, continuation)
+        head = tmp_path / "events.jsonl"
+        self._write(head, self._link("events.2.jsonl"), {**start, "checkpoint": True}, {**user, "checkpoint": True}, final_answer)
+        session = _parse_cli_jsonl_file(head)
+        assert session is not None
+        originals = [user, first_answer, continuation, final_answer]
+        assert [(message.source_event_id, message.content) for message in session.messages] == [(event["id"], event["data"]["content"]) for event in originals]
+        assert session.session_id == start["data"]["sessionId"]
+        assert session.source_file == str(head)
+
+    @pytest.mark.parametrize("previous", ["../events.1.jsonl", "..\\events.1.jsonl", "C:\\events.1.jsonl", "events.jsonl", "events.01.jsonl", "events.0.jsonl"])
+    def test_invalid_predecessor_cannot_be_a_partial_success(self, tmp_path, previous):
+        from copilot_session_tools.scanner import _parse_cli_jsonl_file
+
+        head = tmp_path / "events.jsonl"
+        self._write(head, self._link(previous), {"type": "assistant.message", "data": {"content": "Incomplete head"}})
+        assert _parse_cli_jsonl_file(head) is None
+
+    @pytest.mark.parametrize("failure", ["missing", "foreign-session", "unsupported-version", "nondecreasing", "truncated"])
+    def test_broken_chain_is_not_reported_as_complete(self, tmp_path, failure):
+        from copilot_session_tools.scanner import _parse_cli_jsonl_file
+
+        head = tmp_path / "events.jsonl"
+        first = tmp_path / "events.1.jsonl"
+        start = {"type": "session.start", "data": {"sessionId": "other" if failure == "foreign-session" else "journal-session"}}
+        self._write(first, start, {"type": "user.message", "data": {"content": "Original request"}})
+        link = self._link("events.1.jsonl", version=2 if failure == "unsupported-version" else 1)
+        self._write(head, link, {"type": "assistant.message", "data": {"content": "Incomplete head"}})
+        if failure == "missing":
+            first.unlink()
+        elif failure == "nondecreasing":
+            self._write(first, self._link("events.1.jsonl"), start)
+        elif failure == "truncated":
+            first.write_text(first.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
+        assert _parse_cli_jsonl_file(head) is None
 
 
 class TestCLISubagentBrackets:

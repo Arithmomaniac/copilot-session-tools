@@ -29,6 +29,8 @@ from copilot_session_tools.utils import (
     strip_ansi,
     truncate_preview,
     urldecode,
+    workflow_details,
+    workflow_summary,
 )
 
 
@@ -636,6 +638,23 @@ class TestPrettifyJson:
 # ---------------------------------------------------------------------------
 # detect_language
 # ---------------------------------------------------------------------------
+
+
+class TestWorkflowDetails:
+    def test_inspect_result_uses_envelope_not_delimiters_inside_error(self):
+        import json
+
+        envelope = {"runId": "run-1", "status": "error", "error": "Unexpected Current run detail: in worker output"}
+        content = f'Workflow "review" run run-1 has terminal status error. Full run result: {json.dumps(envelope)}'
+
+        assert workflow_details(content) == {**envelope, "workflowName": "review"}
+
+    def test_arbitrary_agent_json_is_not_a_workflow(self):
+        assert workflow_details('{"runId":"run-1","status":"completed","result":"ordinary agent data"}') is None
+
+    def test_legacy_flat_status_remains_readable(self):
+        content = "Workflow review (run-1): completed | 4 subagents"
+        assert workflow_summary(content) == content
 
 
 class TestDetectLanguage:

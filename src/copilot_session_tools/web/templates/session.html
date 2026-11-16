@@ -985,6 +985,50 @@ header h1 {
 }
 .subagent-prompt-content p { margin: 0 0 4px; }
 
+.workflow-run {
+    flex-shrink: 0;
+    padding: 3px 7px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 0.72em;
+}
+.subagent-message > summary .subagent-label { color: var(--text-secondary); }
+.diagnostic-block {
+    margin: 6px 0;
+    color: var(--text-secondary);
+    font-size: 0.8em;
+}
+.diagnostic-block > summary { cursor: pointer; }
+.diagnostic-block pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-status {
+    margin: 12px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid #6366f1;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    overflow-wrap: anywhere;
+}
+.workflow-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.workflow-heading strong { font-size: 1.1em; margin-right: auto; }
+.workflow-eyebrow { color: var(--text-secondary); font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.08em; }
+.workflow-metrics { display: flex; flex-wrap: wrap; gap: 20px; margin: 16px 0 0; }
+.workflow-metrics dt { font-size: 0.75em; color: var(--text-secondary); }
+.workflow-metrics dd { margin: 2px 0 0; font-weight: 600; }
+.workflow-description { margin: 14px 0 0; }
+.workflow-error { border-left: 2px solid #cf222e; padding-left: 12px; }
+.workflow-agents { margin-top: 16px; width: 100%; font-size: 0.85em; }
+.workflow-state { margin-top: 14px; }
+.workflow-state > summary { cursor: pointer; color: var(--text-secondary); font-size: 0.85em; }
+.workflow-state pre, pre.structured-result { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-table-scroll { overflow-x: auto; }
+@media (max-width: 600px) {
+    .subagent-block > summary { flex-wrap: wrap; }
+    .subagent-label { min-width: 120px; white-space: normal; overflow-wrap: anywhere; }
+    .subagent-content { padding: 8px; }
+}
+
 @media (prefers-color-scheme: dark) {
     .subagent-prompt {
         background: rgba(99, 102, 241, 0.1);
@@ -2892,6 +2936,49 @@ input:checked + .toggle-switch::after {
 
         {% if is_enriched %}
 
+        {%- macro render_result(content) -%}
+            {%- if detect_language(content, is_output=True) == 'json' -%}
+            <pre class="structured-result">{{ highlight_code(content | prettify_json, 'json') }}</pre>
+            {%- else -%}
+            {{- content | markdown | safe -}}
+            {%- endif -%}
+        {%- endmacro %}
+
+        {%- macro render_workflow(workflow) -%}
+        <article class="workflow-status" aria-label="Workflow run">
+            <div class="workflow-eyebrow">Workflow</div>
+            <div class="workflow-heading">
+                <strong>{{ (workflow.get('workflowName') or 'Workflow') | strip_ansi }}</strong>
+                <code class="workflow-run" title="{{ workflow.runId }}">run {{ workflow.runId[:8] }}</code>
+                <span class="status-badge {{ workflow.status if workflow.status in ('completed', 'error', 'running', 'pending', 'paused', 'halted', 'cancelled') else '' }}">{{ workflow.status | strip_ansi }}</span>
+            </div>
+            <dl class="workflow-metrics">
+                {% if workflow.get('attempt') is number %}<div><dt>Attempt</dt><dd>{{ workflow.attempt }}</dd></div>{% endif %}
+                {% if workflow.get('consumedSubagents') is number %}<div><dt>Subagents</dt><dd>{{ workflow.consumedSubagents }}</dd></div>{% endif %}
+                {% if workflow.get('elapsedMs') is number %}<div><dt>Active time</dt><dd>{{ '%.1f' | format(workflow.elapsedMs / 1000) }}s</dd></div>{% endif %}
+                {% if workflow.get('consumedNanoAiu') is number %}<div><dt>AI credits</dt><dd>{{ '%.2f' | format(workflow.consumedNanoAiu / 1000000000) }}</dd></div>{% endif %}
+            </dl>
+            {% for key in ('error', 'reason', 'resultPreview', 'retryGuidance') %}
+                {% if workflow.get(key) is string and workflow[key] %}<p class="workflow-description{% if key == 'error' %} workflow-error{% endif %}">{{ workflow[key] | strip_ansi }}</p>{% endif %}
+            {% endfor %}
+            {% if workflow.get('agents') is sequence and workflow.agents is not string and workflow.agents is not mapping and workflow.agents %}
+            <div class="workflow-table-scroll"><table class="workflow-agents">
+                <thead><tr><th>Agent</th><th>Status</th><th>Model</th><th>Active time</th></tr></thead>
+                <tbody>{% for agent in workflow.agents if agent is mapping %}<tr>
+                    <td><code title="{{ agent.get('agentId', '') }}">{{ agent.get('agentId', '')[:8] }}</code></td>
+                    <td>{{ agent.get('status', 'unknown') }}</td>
+                    <td>{% set model = agent.get('model') %}{{ model.get('resolved') or model.get('requested') or '—' if model is mapping else '—' }}</td>
+                    <td>{% if agent.get('activeMs') is number %}{{ '%.1f' | format(agent.activeMs / 1000) }}s{% else %}—{% endif %}</td>
+                </tr>{% endfor %}</tbody>
+            </table></div>
+            {% endif %}
+            {% if 'result' in workflow %}<div class="workflow-description">{{ render_result(workflow.result if workflow.result is string else workflow.result | tojson(indent=2)) }}</div>{% endif %}
+            {% for key, label in (('failure', 'Failure details'), ('pauseInfo', 'Pause details'), ('snapshot', 'Execution checkpoint')) %}
+                {% if workflow.get(key) is not none %}<details class="workflow-state"><summary>{{ label }}</summary><pre>{{ workflow[key] | tojson(indent=2) }}</pre></details>{% endif %}
+            {% endfor %}
+        </article>
+        {%- endmacro %}
+
         {# ===== Macro: render_content_blocks ===== #}
         {# Renders content blocks, tool invocations, file changes, and command runs. #}
         {# Used for both outer messages and nested subagent content (recursive). #}
@@ -2932,40 +3019,53 @@ input:checked + .toggle-switch::after {
                             <span class="status-badge fork">{{ block.content | markdown | safe }}</span>
                             {% elif block.description == 'context-change' %}
                             <span class="status-badge model-change context-change">{{ block.content }}</span>
+                            {% elif block.description == 'hook-error' %}
+                            <details class="diagnostic-block">
+                                <summary><span>{{ block.content.split(' - ', 1)[0] }}</span></summary>
+                                <pre>{{ block.content }}</pre>
+                            </details>
+                            {% elif block.description == 'workflow' %}
+                            {% set workflow = block.content | workflow_details %}
+                            {% if workflow %}{{ render_workflow(workflow) }}{% else %}<span class="status-badge workflow">{{ block.content }}</span>{% endif %}
                             {% else %}
                             <span class="status-badge {{ block.description or '' }}">{{ block.content }}</span>
                             {% endif %}
                             {% elif block.kind in ('subagent', 'subagent_failed', 'subagent_incomplete') %}
-                            {% set is_nested_system = block.child_message and block.child_message.role == 'system' %}{% if not is_nested_system or not static or include_system_messages %}<details class="subagent-block{% if is_nested_system %} subagent-system-message{% endif %}{% if block.kind == 'subagent_failed' %} subagent-failed{% endif %}{% if block.is_background %} subagent-background{% endif %}"{% if block.agent_id %} id="agent-{{ block.agent_id }}"{% endif %} open>
+                            {% set workflow_parts = (block.description or 'Agent').split(' · workflow ', 1) -%}
+                            {% set is_stream_message = block.child_message and block.description in ('User', 'Assistant', 'System') -%}
+                            {% set is_nested_system = block.child_message and block.child_message.role == 'system' %}{% if not is_nested_system or not static or include_system_messages %}<details class="subagent-block{% if is_stream_message %} subagent-message{% endif %}{% if is_nested_system %} subagent-system-message{% endif %}{% if block.kind == 'subagent_failed' %} subagent-failed{% endif %}{% if block.is_background %} subagent-background{% endif %}"{% if block.agent_id %} id="agent-{{ block.agent_id }}"{% endif %}{% if workflow_parts | length == 1 and not (is_stream_message and block.child_message.role == 'user') %} open{% endif %}>
                                 <summary>
                                     <span class="collapsible-icon" aria-hidden="true">▼</span>
-                                    <span class="subagent-label">{{ block.description or 'Agent' }}</span>
+                                    <span class="subagent-label" title="{{ block.description or 'Agent' }}">{{ workflow_parts[0] | compact_agent_label if workflow_parts | length > 1 else workflow_parts[0] }}</span>
+                                    {% if workflow_parts | length > 1 %}<code class="workflow-run" title="{{ workflow_parts[1] }}">run {{ workflow_parts[1][:8] }}</code>{% endif -%}
                                     {% if block.is_background %}
                                     <span class="subagent-background-badge">↗ background</span>
                                     {% endif %}
-                                    {% if block.kind == 'subagent_failed' %}
+                                    {% if not is_stream_message %}{% if block.kind == 'subagent_failed' %}
                                     <span class="status-badge error">failed</span>
                                     {% elif block.kind == 'subagent_incomplete' %}
                                     <span class="status-badge abort">incomplete</span>
                                     {% else %}
                                     <span class="status-badge success">completed</span>
-                                    {% endif %}
+                                    {% endif %}{% endif %}
                                 </summary>
                                 <div class="subagent-content">
                                     {% if block.prompt %}
-                                    <details class="subagent-prompt" open>
+                                    <details class="subagent-prompt">
                                         <summary class="subagent-prompt-label"><span class="collapsible-icon" aria-hidden="true">▼</span> Prompt</summary>
                                         <div class="subagent-prompt-content">
-                                            {{ block.prompt | markdown | safe }}
+                                            {{ block.prompt | markdown(literal_html=true) | safe }}
                                         </div>
                                     </details>
                                     {% endif %}
-                                    {% if include_agent_details is not defined or include_agent_details %}
+                                    {% if block.child_message and block.child_message.role == 'user' %}
+                                    {{ block.content | markdown(literal_html=true) | safe }}
+                                    {% elif include_agent_details is not defined or include_agent_details %}
                                     {# Full details: all tools, commands, file changes, result #}
                                     {% if block.content_blocks %}
                                     {{ render_content_blocks(block.content_blocks, block.tool_invocations, block.file_changes, block.command_runs, get_nested_meta(block), block.content) }}
                                     {% else %}
-                                    {{ block.content | markdown | safe }}
+                                    {{ render_result(block.content) }}
                                     {% endif %}
                                     {% else %}
                                     {# Result only: just show text blocks (the agent's response) #}
@@ -2974,14 +3074,14 @@ input:checked + .toggle-switch::after {
                                     {% for inner in block.content_blocks %}
                                     {% if inner.kind == 'text' and inner.content.strip() %}
                                     <div class="content-block content-block-text result-block">
-                                        {{ inner.content | markdown | safe }}
+                                        {{ render_result(inner.content) }}
                                     </div>
                                     {% set has_result = true %}
                                     {% endif %}
                                     {% endfor %}
                                     {% endif %}
                                     {% if not has_result %}
-                                    {{ block.content | markdown | safe }}
+                                    {{ render_result(block.content) }}
                                     {% endif %}
                                     {% endif %}
                                 </div>
@@ -3112,8 +3212,11 @@ input:checked + .toggle-switch::after {
                             
                             {# Determine the pretty header text - use invocation_message if available, else block content #}
                             {% set pretty_header = matched_tool.invocation_message if matched_tool.invocation_message else block.content %}
+                            {% set workflow = matched_tool.result | workflow_details if matched_tool.name in ('run_dynamic_workflow', 'dynamic_workflows_manage') and matched_tool.result else none -%}
                             
-                            {% if matched_tool.is_agent_backlink and matched_tool.backlink_agent_id %}
+                            {% if workflow %}
+                            <div class="content-block content-block-toolInvocation">{{ render_workflow(workflow) }}</div>
+                            {% elif matched_tool.is_agent_backlink and matched_tool.backlink_agent_id %}
                             {# Determine backlink state from read_agent result text #}
                             {% set agent_result = matched_tool.result or '' %}
                             {% if 'status: running' in agent_result or 'still running' in agent_result %}
@@ -3215,7 +3318,7 @@ input:checked + .toggle-switch::after {
                             {% elif block.kind == 'text' %}
                             {% if block.content.strip() %}
                             <div class="content-block content-block-text result-block">
-                                {{ block.content | markdown | safe }}
+                                {{ render_result(block.content) }}
                             </div>
                             {% endif %}
                             {% else %}
@@ -3226,7 +3329,7 @@ input:checked + .toggle-switch::after {
                         {% endfor %}
                     {% elif fallback_content %}
                         {# Fallback to flat content for backwards compatibility #}
-                        {{ fallback_content | markdown | safe }}
+                        {{ render_result(fallback_content) }}
                     {% endif %}
 
                 {# Show unmatched tool invocations #}

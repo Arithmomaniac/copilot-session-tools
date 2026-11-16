@@ -642,6 +642,27 @@ class TestCommandRunDescriptionInMarkdown:
 class TestAgentBlockquotes:
     """Test agent subagent content block rendering in markdown."""
 
+    @pytest.mark.parametrize("include_system", [False, True])
+    def test_delegated_stream_content_and_visibility(self, include_system):
+        prompt = ChatMessage(role="user", content="Inspect the workflow")
+        system = ChatMessage(role="system", content="Runtime context")
+        answer = ChatMessage(
+            role="assistant",
+            content="Verified workflow output",
+            content_blocks=[ContentBlock(kind="thinking", content="Private analysis"), ContentBlock(kind="text", content="Verified workflow output")],
+        )
+        envelope = ChatMessage(role="assistant", content="", children=[prompt, system, answer])
+        parent = ChatMessage(role="assistant", content="", content_blocks=[ContentBlock(kind="subagent", content="(no output)", child_message=envelope)])
+        session = ChatSession(session_id="workflow-export", workspace_name=None, workspace_path=None, messages=[parent])
+        content_set = {"agent-details"} | ({"system-messages"} if include_system else set())
+        markdown = session_to_markdown(session, content_set=content_set)
+        assert prompt.content in markdown and answer.content in markdown
+        assert (system.content in markdown) == include_system
+        assert "Private analysis" not in markdown
+        assert "(no output)" not in markdown
+        summary = session_to_markdown(session, content_set=set())
+        assert answer.content not in summary
+
     def test_subagent_block_rendered_as_details(self):
         """ContentBlock(kind='subagent') should render as a collapsible details block."""
         messages = [

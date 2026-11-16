@@ -26,6 +26,9 @@ from .utils import (
 from .utils import (
     urldecode as _urldecode,
 )
+from .utils import (
+    workflow_summary as _workflow_summary,
+)
 
 
 def _format_timestamp(value: str | int | None) -> str:
@@ -139,6 +142,7 @@ def _format_message_content(
     include_thinking: bool = False,
     include_agent_details: bool = True,
     include_tools: bool = True,
+    include_system_messages: bool = False,
 ) -> str:
     """Format message content, optionally including thinking blocks and agent details.
 
@@ -172,8 +176,27 @@ def _format_message_content(
                     parts.append(f"*🤖 {agent_name} — {status}*")
                     continue
                 # Full content in a collapsible details block
-                agent_content = block.content.replace(chr(10), chr(10) + "> ")
+                agent_content = block.content
+                if block.child_message and block.child_message.children:
+                    nested_parts = []
+                    for child in block.child_message.children:
+                        if child.role == "system" and not include_system_messages:
+                            continue
+                        child_content = _format_message_content(
+                            child,
+                            include_thinking=include_thinking,
+                            include_agent_details=include_agent_details,
+                            include_tools=include_tools,
+                            include_system_messages=include_system_messages,
+                        )
+                        if child_content:
+                            nested_parts.append(f"**{child.role.title()}:**\n\n{child_content}")
+                    agent_content = "\n\n".join(nested_parts)
+                agent_content = agent_content.replace(chr(10), chr(10) + "> ")
                 parts.append(f"<details>\n<summary>{agent_name} — {status}</summary>\n\n> {agent_content}\n\n</details>")
+                continue
+            elif block.kind == "status" and block.description == "workflow":
+                parts.append(_workflow_summary(block.content))
                 continue
             elif block.kind == "status" and block.description == "task-complete":
                 tc_content = block.content.replace(chr(10), chr(10) + "> ")
@@ -312,6 +335,7 @@ def session_to_markdown(
             include_tools=include_tools,
             include_commands=include_commands,
             include_file_changes=include_file_changes,
+            include_system_messages=include_system_messages,
         )
         lines.append(msg_md)
 
@@ -328,6 +352,7 @@ def message_to_markdown(
     include_tools: bool = True,
     include_commands: bool = True,
     include_file_changes: bool = True,
+    include_system_messages: bool = False,
 ) -> str:
     """Convert a single message to markdown format.
 
@@ -363,6 +388,7 @@ def message_to_markdown(
         include_thinking=include_thinking,
         include_agent_details=include_agent_details,
         include_tools=include_tools,
+        include_system_messages=include_system_messages,
     )
     lines.append(content)
 

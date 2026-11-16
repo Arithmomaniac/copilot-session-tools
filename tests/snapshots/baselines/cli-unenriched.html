@@ -938,6 +938,50 @@ header h1 {
 }
 .subagent-prompt-content p { margin: 0 0 4px; }
 
+.workflow-run {
+    flex-shrink: 0;
+    padding: 3px 7px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 0.72em;
+}
+.subagent-message > summary .subagent-label { color: var(--text-secondary); }
+.diagnostic-block {
+    margin: 6px 0;
+    color: var(--text-secondary);
+    font-size: 0.8em;
+}
+.diagnostic-block > summary { cursor: pointer; }
+.diagnostic-block pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-status {
+    margin: 12px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid #6366f1;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    overflow-wrap: anywhere;
+}
+.workflow-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.workflow-heading strong { font-size: 1.1em; margin-right: auto; }
+.workflow-eyebrow { color: var(--text-secondary); font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.08em; }
+.workflow-metrics { display: flex; flex-wrap: wrap; gap: 20px; margin: 16px 0 0; }
+.workflow-metrics dt { font-size: 0.75em; color: var(--text-secondary); }
+.workflow-metrics dd { margin: 2px 0 0; font-weight: 600; }
+.workflow-description { margin: 14px 0 0; }
+.workflow-error { border-left: 2px solid #cf222e; padding-left: 12px; }
+.workflow-agents { margin-top: 16px; width: 100%; font-size: 0.85em; }
+.workflow-state { margin-top: 14px; }
+.workflow-state > summary { cursor: pointer; color: var(--text-secondary); font-size: 0.85em; }
+.workflow-state pre, pre.structured-result { max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-table-scroll { overflow-x: auto; }
+@media (max-width: 600px) {
+    .subagent-block > summary { flex-wrap: wrap; }
+    .subagent-label { min-width: 120px; white-space: normal; overflow-wrap: anywhere; }
+    .subagent-content { padding: 8px; }
+}
+
 @media (prefers-color-scheme: dark) {
     .subagent-prompt {
         background: rgba(99, 102, 241, 0.1);

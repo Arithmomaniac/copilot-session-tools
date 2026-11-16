@@ -14,6 +14,7 @@ from copilot_session_tools.sources import SessionIdentityConflictError, discover
 from copilot_session_tools.utils import (
     build_block_metadata,
     build_root_agent_markers,
+    compact_agent_label,
     detect_language,
     extract_filename,
     format_timestamp,
@@ -25,6 +26,7 @@ from copilot_session_tools.utils import (
     strip_ansi,
     truncate_preview,
     urldecode,
+    workflow_details,
 )
 
 
@@ -77,6 +79,8 @@ def create_app(
     app.jinja_env.filters["truncate_preview"] = truncate_preview
     app.jinja_env.filters["from_json"] = _from_json
     app.jinja_env.filters["prettify_json"] = prettify_json
+    app.jinja_env.filters["workflow_details"] = workflow_details
+    app.jinja_env.filters["compact_agent_label"] = compact_agent_label
 
     # Register global functions for template calls
     app.jinja_env.globals["detect_language"] = detect_language

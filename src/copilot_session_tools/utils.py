@@ -221,6 +221,58 @@ def prettify_json(text: str | None) -> str:
         return text
 
 
+def workflow_details(text: str) -> dict | None:
+    name = None
+    payload = text
+    match = re.fullmatch(
+        r'Workflow "(.*?)" run (\S+) (?:is still \w+\. Do not wait for it to finish\. Current run detail: |has terminal status \w+\. Full run result: )(\{.*\})',
+        text,
+        re.DOTALL,
+    )
+    if match:
+        name = match[1]
+        payload = match[3]
+    if not payload.lstrip().startswith("{"):
+        return None
+    try:
+        value = json.loads(payload)
+    except (json.JSONDecodeError, RecursionError):
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("runId"), str) or not isinstance(value.get("status"), str):
+        return None
+    if name is None and value.get("type") != "workflow_completed":
+        return None
+    if match and value["runId"] != match[2]:
+        return None
+    if name is not None:
+        value["workflowName"] = name
+    return value
+
+
+def workflow_summary(text: str) -> str:
+    value = workflow_details(text)
+    if value is None:
+        return text
+    parts = [f"Workflow {value.get('workflowName') or 'unknown'} ({value['runId']}): {value['status']}"]
+    if type(value.get("consumedSubagents")) is int:
+        parts.append(f"{value['consumedSubagents']} subagents")
+    if type(value.get("consumedNanoAiu")) in (int, float):
+        parts.append(f"{value['consumedNanoAiu'] / 1_000_000_000:g} AI credits")
+    if type(value.get("attempt")) is int:
+        parts.append(f"attempt {value['attempt']}")
+    if type(value.get("elapsedMs")) in (int, float):
+        parts.append(f"{value['elapsedMs'] / 1000:g}s active")
+    for key in ("resultPreview", "error", "reason", "retryGuidance"):
+        if isinstance(value.get(key), str) and value[key]:
+            parts.append(value[key])
+    return strip_ansi(" | ".join(parts))
+
+
+def compact_agent_label(label: str) -> str:
+    shortened = re.sub(r"-([0-9a-f]{24,64})$", lambda match: f" · {match[1][:8]}", label)
+    return shortened[:1].upper() + shortened[1:] if shortened != label else label
+
+
 def detect_language(text: str, tool_name: str | None = None, *, is_output: bool = False) -> str | None:
     """Heuristically detect the language of *text* for syntax highlighting.
 
@@ -312,6 +364,10 @@ _md_converter = markdown.Markdown(
     },
 )
 
+_md_literal_html_converter = markdown.Markdown(extensions=["tables", "fenced_code", "sane_lists", "smarty", "nl2br"])
+_md_literal_html_converter.preprocessors.deregister("html_block")
+_md_literal_html_converter.inlinePatterns.deregister("html")
+
 
 def _extract_filename_from_file_uri(uri: str) -> str:
     """Extract the leaf filename from a ``file://`` URI."""
@@ -324,7 +380,7 @@ def _extract_filename_from_file_uri(uri: str) -> str:
     return path
 
 
-def markdown_to_html(text: str) -> str:
+def markdown_to_html(text: str, *, literal_html: bool = False) -> str:
     """Convert markdown to HTML, normalizing common VS Code Copilot patterns."""
     if not text:
         return ""
@@ -343,8 +399,9 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r"^((?:Now )?[Ll]et me [^:]+:)$", r"_\1_", text, flags=re.MULTILINE)
     text = re.sub(r"^(Made changes\.)$", r"_\1_", text, flags=re.MULTILINE)
 
-    _md_converter.reset()
-    return Markup(_md_converter.convert(text))  # noqa: S704 - markdown output is intentionally rendered as HTML
+    converter = _md_literal_html_converter if literal_html else _md_converter
+    converter.reset()
+    return Markup(converter.convert(text))  # noqa: S704 - markdown output is intentionally rendered as HTML
 
 
 # ---------------------------------------------------------------------------
