@@ -642,6 +642,54 @@ class TestCommandRunDescriptionInMarkdown:
 class TestAgentBlockquotes:
     """Test agent subagent content block rendering in markdown."""
 
+    def test_nested_agent_preserves_parent_content(self):
+        nested = ChatMessage(role="assistant", content="Nested findings")
+        agent = ChatMessage(
+            role="assistant",
+            content="Parent findings",
+            children=[nested],
+            content_blocks=[
+                ContentBlock(kind="text", content="Parent findings"),
+                ContentBlock(kind="subagent", content=nested.content, child_message=nested),
+            ],
+        )
+        parent = ChatMessage(role="assistant", content="", content_blocks=[ContentBlock(kind="subagent", content=agent.content, child_message=agent)])
+        session = ChatSession(session_id="nested-agent", workspace_name=None, workspace_path=None, messages=[parent])
+
+        markdown = session_to_markdown(session)
+
+        assert agent.content in markdown
+        assert nested.content in markdown
+
+    @pytest.mark.parametrize("included", ["file-changes", "diffs", "tools", "tool-inputs", "commands"])
+    def test_delegated_message_metadata_respects_export_options(self, included):
+        change = FileChange(path="delegated-file.py", diff="+delegated_change")
+        tool = ToolInvocation(name="delegated_tool", input="delegated input")
+        command = CommandRun(command="delegated-command", title="Delegated command")
+        answer = ChatMessage(role="assistant", content="Delegated answer", file_changes=[change], tool_invocations=[tool], command_runs=[command])
+        envelope = ChatMessage(
+            role="assistant",
+            content="",
+            children=[answer],
+            content_blocks=[ContentBlock(kind="subagent", content=answer.content, child_message=answer)],
+        )
+        parent = ChatMessage(role="assistant", content="", content_blocks=[ContentBlock(kind="subagent", content="", child_message=envelope)])
+        session = ChatSession(session_id="delegated-metadata", workspace_name=None, workspace_path=None, messages=[parent])
+        expected = {"file-changes": change.path, "diffs": change.diff, "tools": tool.name, "tool-inputs": tool.input, "commands": command.title}
+        content_set = {"agent-details", included}
+        if included == "diffs":
+            content_set.add("file-changes")
+        elif included == "tool-inputs":
+            content_set.add("tools")
+
+        markdown = session_to_markdown(session, content_set=content_set)
+        excluded = session_to_markdown(session, content_set={"agent-details"})
+
+        expected_value = expected[included]
+        assert expected_value is not None
+        assert expected_value in markdown
+        assert expected_value not in excluded
+
     @pytest.mark.parametrize("include_system", [False, True])
     def test_delegated_stream_content_and_visibility(self, include_system):
         prompt = ChatMessage(role="user", content="Inspect the workflow")
@@ -651,7 +699,13 @@ class TestAgentBlockquotes:
             content="Verified workflow output",
             content_blocks=[ContentBlock(kind="thinking", content="Private analysis"), ContentBlock(kind="text", content="Verified workflow output")],
         )
-        envelope = ChatMessage(role="assistant", content="", children=[prompt, system, answer])
+        children = [prompt, system, answer]
+        envelope = ChatMessage(
+            role="assistant",
+            content="",
+            children=children,
+            content_blocks=[ContentBlock(kind="subagent", content=child.content, child_message=child) for child in children],
+        )
         parent = ChatMessage(role="assistant", content="", content_blocks=[ContentBlock(kind="subagent", content="(no output)", child_message=envelope)])
         session = ChatSession(session_id="workflow-export", workspace_name=None, workspace_path=None, messages=[parent])
         content_set = {"agent-details"} | ({"system-messages"} if include_system else set())

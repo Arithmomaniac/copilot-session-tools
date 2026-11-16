@@ -33,17 +33,19 @@ Loaded skill: azsafe
 <details>
 <summary>General Purpose Agent: Fix JWT token refresh bug — completed</summary>
 
-> *Searching for `jwt.decode` in ``*
-> 
-> *Viewing `jwt.py`*
-> 
-> *Edited jwt.py*
-> 
-> *powershell*
-> 
+> *🔧 Searching for `jwt.decode` in ``*
+>
+> *🔧 Viewing `jwt.py`*
+>
+> *🔧 Edited `jwt.py`*
+>
+> *🔧 Run auth tests*
+>
 > Fixed the JWT token refresh bug in src/auth/jwt.py:
 > - Added algorithm parameter to jwt.decode()
 > - All 2 auth tests pass.
+>
+> ---
 
 </details>
 
@@ -54,9 +56,11 @@ Now let me verify with an explore agent.
 <details>
 <summary>Explore Agent: Verify fix in related files — completed</summary>
 
-> *Searching for `jwt.decode` in ``*
-> 
+> *🔧 Searching for `jwt.decode` in ``*
+>
 > Verified: only jwt.py uses jwt.decode(). The fix covers all paths.
+>
+> ---
 
 </details>
 

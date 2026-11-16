@@ -1,6 +1,7 @@
 """Tests for the HTML exporter module."""
 
 import json
+import re
 
 import pytest
 
@@ -154,6 +155,33 @@ def test_workflow_readable_presentation(tmp_path, renderer):
     assert "12.5s" in html
     assert 'class="workflow-agents"' in html
     assert model["resolved"] in html
+
+
+@pytest.mark.parametrize("include_tools", [False, True])
+def test_workflow_tool_result_respects_tools_toggle(include_tools):
+    run = {"runId": "workflow-visibility", "status": "completed", "result": "Detailed workflow output"}
+    tool = ToolInvocation(
+        name="dynamic_workflows_manage",
+        invocation_message="Inspect workflow run",
+        result=f'Workflow "review" run {run["runId"]} has terminal status completed. Full run result: {json.dumps(run)}',
+    )
+    assert tool.invocation_message is not None
+    message = ChatMessage(role="assistant", content="", tool_invocations=[tool], content_blocks=[ContentBlock(kind="toolInvocation", content=tool.invocation_message)])
+    session = ChatSession(session_id="workflow-visibility", workspace_name=None, workspace_path=None, messages=[message])
+
+    html = session_to_html(session, content_set={"tools"} if include_tools else set())
+    wrapped = re.search(
+        r'<details class="tool-invocation-wrapper" open>\s*<summary>.*?</summary>\s*<article class="workflow-status".*?</article>\s*</details>'
+        r'\s*<div class="tool-invocation-inline-fallback">(?P<fallback>.*?)</div>',
+        html,
+        re.DOTALL,
+    )
+    assert wrapped is not None
+    body = re.search(r'<body[^>]*class="([^"]*)"', html)
+    assert body is not None
+    assert ("hide-tools" in body[1].split()) == (not include_tools)
+    assert tool.invocation_message in wrapped["fallback"]
+    assert run["result"] not in wrapped["fallback"]
 
 
 @pytest.fixture

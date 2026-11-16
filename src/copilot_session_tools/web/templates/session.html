@@ -3215,7 +3215,16 @@ input:checked + .toggle-switch::after {
                             {% set workflow = matched_tool.result | workflow_details if matched_tool.name in ('run_dynamic_workflow', 'dynamic_workflows_manage') and matched_tool.result else none -%}
                             
                             {% if workflow %}
-                            <div class="content-block content-block-toolInvocation">{{ render_workflow(workflow) }}</div>
+                            <div class="content-block content-block-toolInvocation tool-invocation-inline">
+                                <details class="tool-invocation-wrapper" open>
+                                    <summary>
+                                        <span class="collapsible-icon" aria-hidden="true">▼</span>
+                                        <span class="tool-invocation-message">{{ pretty_header | markdown | safe }}</span>
+                                    </summary>
+                                    {{ render_workflow(workflow) }}
+                                </details>
+                                <div class="tool-invocation-inline-fallback">{{ pretty_header | markdown | safe }}</div>
+                            </div>
                             {% elif matched_tool.is_agent_backlink and matched_tool.backlink_agent_id %}
                             {# Determine backlink state from read_agent result text #}
                             {% set agent_result = matched_tool.result or '' %}
