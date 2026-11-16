@@ -216,6 +216,15 @@ def _format_session_event_status(event_type: str, event_data: dict) -> tuple[str
         return f"MCP OAuth required: {server}" if server else "MCP OAuth required", "mcp-oauth"
     if event_type == "mcp.oauth_completed":
         return "MCP OAuth completed", "mcp-oauth"
+    if event_type == "mcp.oauth_recovery_completed":
+        server = _stringify_event_value(event_data.get("serverName"))
+        outcome = _stringify_event_value(event_data.get("outcome"))
+        return f"MCP OAuth recovery: {server} - {outcome}", "mcp-oauth"
+    if event_type == "session.permission_recovery":
+        status = _stringify_event_value(event_data.get("status"))
+        reason = _stringify_event_value(event_data.get("reason"))
+        label = f"Permission recovery: {status}"
+        return f"{label} - {reason}" if reason else label, "permission"
     if event_type == "model.call_failure":
         source = _stringify_event_value(event_data.get("source"))
         error = _stringify_event_value(event_data.get("error") or event_data.get("message"))
@@ -246,6 +255,9 @@ def _format_session_event_status(event_type: str, event_data: dict) -> tuple[str
         details = " ".join(part for part in (operation, path) if part)
         return f"Workspace file changed: {details}" if details else "Workspace file changed", "workspace-file"
     if event_type == "system.notification":
+        notification = event_data.get("kind")
+        if isinstance(notification, dict) and notification.get("type") == "workflow_completed":
+            return ssrjson.dumps(notification), "workflow"
         content = _stringify_event_value(event_data.get("content"))
         kind = _stringify_event_value(event_data.get("kind"))
         if content:
@@ -258,6 +270,97 @@ def _format_session_event_status(event_type: str, event_data: dict) -> tuple[str
         partial = _stringify_event_value(event_data.get("partialOutput"))
         return f"Tool partial result: {partial}" if partial else "Tool partial result", "tool-progress"
     return None
+
+
+def _format_human_response(response: dict) -> tuple[str, str] | None:
+    kind = response.get("responseKind")
+    if kind == "exit_plan_mode":
+        approved = response.get("approved")
+        decision = "approved" if approved is True else "rejected" if approved is False else "reviewed (decision unavailable)"
+        parts = [f"Plan {decision}"]
+        action = _stringify_event_value(response.get("selectedAction"))
+        if decision == "approved" and action:
+            parts[0] += f": {action}"
+        for key in ("summary", "planContent", "feedback"):
+            text = _stringify_event_value(response.get(key))
+            if text:
+                parts.append(f"Feedback: {text}" if key == "feedback" else text)
+        return "\n\n".join(parts), "plan-review"
+    if kind == "ask_user":
+        question = _stringify_event_value(response.get("message"))
+        answer = response.get("content")
+        if isinstance(answer, dict):
+            answer_text = ", ".join(f"{key}={_stringify_event_value(value)}" for key, value in answer.items())
+        else:
+            answer_text = _stringify_event_value(answer)
+        action = _stringify_event_value(response.get("action"))
+        outcome = action or answer_text
+    elif kind == "user_input":
+        question = _stringify_event_value(response.get("question"))
+        outcome = "dismissed" if response.get("dismissed") else _stringify_event_value(response.get("answer"))
+    else:
+        return None
+    return f"{question}\n\nResponse: {outcome}" if outcome else question, "user-input"
+
+
+def _read_cli_events(file_path: Path) -> list[dict]:
+    """Read original history across numbered journals, excluding replay checkpoints."""
+    pieces: list[list[dict]] = []
+    current = file_path
+    session_id: str | None = None
+    previous_number: int | None = None
+    while True:
+        records: list[dict] = []
+        line = ""
+        filename = ""
+        with current.open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                try:
+                    event = ssrjson.loads(line)
+                except ssrjson.JSONDecodeError:
+                    if current != file_path:
+                        raise ValueError("Invalid historical journal record") from None
+                    continue
+                if isinstance(event, dict):
+                    records.append(event)
+            if current != file_path and (not records or not line.endswith("\n")):
+                raise ValueError("Incomplete historical journal")
+        if not records:
+            return []
+        link = records[0] if records[0].get("type") == "session.journal_link" else None
+        if any(event.get("type") == "session.journal_link" for event in records[1:]):
+            raise ValueError("Journal link must be the first record")
+        if link:
+            data = link.get("data", {})
+            owner = data.get("sessionId")
+            filename = data.get("previousFile")
+            if type(data.get("version")) is not int or data["version"] != 1 or link.get("checkpoint"):
+                raise ValueError("Unsupported journal link")
+            if not isinstance(owner, str) or not owner or (session_id is not None and owner != session_id):
+                raise ValueError("Journal link belongs to another session")
+            session_id = owner
+            match = re.fullmatch(r"events\.([1-9][0-9]*)\.jsonl", filename) if isinstance(filename, str) else None
+            if not match:
+                raise ValueError("Invalid predecessor filename")
+            number = int(match.group(1))
+            if previous_number is not None and number >= previous_number:
+                raise ValueError("Journal predecessors must decrease")
+            previous_number = number
+        for event in records:
+            if session_id is not None and event.get("type") in ("session.start", "session.resume"):
+                owner = event.get("data", {}).get("sessionId")
+                if owner is not None and owner != session_id:
+                    raise ValueError("Journal records belong to another session")
+        pieces.append([event for event in records if event is not link and not event.get("checkpoint")])
+        if link is None:
+            break
+        predecessor = file_path.parent / filename
+        if predecessor.resolve().parent != file_path.parent.resolve():
+            raise ValueError("Journal predecessor is outside the session directory")
+        current = predecessor
+    return [event for piece in reversed(pieces) for event in piece]
 
 
 _FUSION_PHASE_LABELS = {
@@ -735,11 +838,19 @@ class _CliSessionIndex:
     bg_agent_results: dict[str, str]
     bg_agent_id_map: dict[str, str]
     agent_display_names: dict[str, str]
+    represented_question_tools: set[str]
+    represented_question_requests: set[str]
     root_agent_intervals: list[RootAgentInterval]
     updated_at: str | None
 
 
 def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
+    program_events = {
+        "program.tool_execution_start": "tool.execution_start",
+        "program.tool_execution_complete": "tool.execution_complete",
+        "program.permission_requested": "permission.requested",
+    }
+    events = [{**event, "type": program_events[event["type"]]} if event.get("type") in program_events else event for event in events]
     tool_executions: dict = {}
     root_agent_intervals: list[RootAgentInterval] = []
     active_root_agent: RootAgentInterval | None = None
@@ -752,6 +863,10 @@ def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
     bg_agent_id_map: dict[str, str] = {}
     agent_display_names: dict[str, str] = {}
     metadata_events: dict[str, dict] = {}
+    agent_streams: dict[str, str] = {}
+    agent_parents: dict[str, str | None] = {}
+    represented_question_requests: set[str] = set()
+    completed_question_requests: set[str] = set()
     for event in events:
         event_type = event.get("type", "")
         event_data = event.get("data", {})
@@ -824,6 +939,11 @@ def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
             tool_call_id = event_data.get("toolCallId", "")
             if tool_call_id:
                 subagent_started_ids.add(tool_call_id)
+                agent_streams[tool_call_id] = event.get("agentId") or tool_call_id
+                agent_parents[tool_call_id] = event_data.get("parentId")
+                display = event_data.get("agentDisplayName") or event_data.get("agentName") or tool_call_id
+                agent_display_names[agent_streams[tool_call_id]] = display
+                agent_display_names[tool_call_id] = display
         elif event_type == "subagent.completed":
             tool_call_id = event_data.get("toolCallId", "")
             if tool_call_id:
@@ -847,6 +967,12 @@ def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
                 active_root_agent.end_timestamp = timestamp
                 root_agent_intervals.append(active_root_agent)
                 active_root_agent = None
+        elif event_type in ("user_input.requested", "elicitation.requested"):
+            if event_data.get("requestId") and (event_data.get("question") or event_data.get("message")):
+                represented_question_requests.add(event_data["requestId"])
+        elif event_type in ("user_input.completed", "elicitation.completed"):
+            if event_data.get("requestId") and (event_data.get("answer") or event_data.get("action") or event_data.get("content")):
+                completed_question_requests.add(event_data["requestId"])
     if active_root_agent is not None:
         root_agent_intervals.append(active_root_agent)
     for tcid in subagent_started_ids:
@@ -857,9 +983,20 @@ def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
     for event in events:
         owner = event.get("agentId") or None
         if event.get("type") in ("subagent.started", "subagent.completed", "subagent.failed"):
-            execution = tool_executions.get(event.get("data", {}).get("toolCallId"), {})
-            owner = (execution.get("start") or {}).get("agentId") or None
+            tool_call_id = event.get("data", {}).get("toolCallId")
+            execution = tool_executions.get(tool_call_id, {})
+            start = execution.get("start")
+            parent_id = agent_parents.get(tool_call_id)
+            owner = (start.get("agentId") or None) if start else agent_streams.get(parent_id, parent_id) if parent_id else None
         events_by_agent.setdefault(owner, []).append(event)
+    represented_question_tools = {
+        tool_call_id
+        for tool_call_id, execution in tool_executions.items()
+        if (start := execution.get("start"))
+        and start.get("data", {}).get("toolName") == "ask_user"
+        and execution.get("complete")
+        and (_as_tool_argument_dict(start.get("data", {}).get("arguments")).get("question") or _as_tool_argument_dict(start.get("data", {}).get("arguments")).get("message"))
+    }
     return _CliSessionIndex(
         events_by_agent=events_by_agent,
         metadata_events=list(metadata_events.values()),
@@ -872,6 +1009,8 @@ def _index_cli_events(events: list[dict]) -> _CliSessionIndex:
         bg_agent_results=bg_agent_results,
         bg_agent_id_map=bg_agent_id_map,
         agent_display_names=agent_display_names,
+        represented_question_tools=represented_question_tools,
+        represented_question_requests=represented_question_requests & completed_question_requests,
         root_agent_intervals=root_agent_intervals,
         updated_at=events[-1].get("timestamp"),
     )
@@ -917,16 +1056,7 @@ def _parse_cli_jsonl_file(
         if _index is None:
             events = _events
             if events is None:
-                events = []
-                with file_path.open(encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            events.append(ssrjson.loads(line))
-                        except ssrjson.JSONDecodeError:
-                            continue
+                events = _read_cli_events(file_path)
             if not events:
                 return None
             _index = _index_cli_events(events)
@@ -1227,6 +1357,9 @@ def _parse_cli_jsonl_file(
                 completed = tool_call_id in builder.subagent_completions
                 # Title includes status indicator for template
                 title = f"{display_name}: {description}" if description else display_name
+                workflow_run_id = _stringify_event_value(event_data.get("workflowRunId"))
+                if workflow_run_id:
+                    title += f" · workflow {workflow_run_id}"
                 if failed:
                     title = f"❌ {title}"
                 # Build content: child tool summaries + result or error
@@ -1234,7 +1367,8 @@ def _parse_cli_jsonl_file(
                 for child_display in builder.subagent_child_tools.get(tool_call_id, []):
                     parts.append(f"*{child_display}*")
                 # Detect background agent (even for failed ones)
-                is_bg = tool_call_id in builder.bg_agent_id_map
+                execution_mode = event_data.get("executionMode")
+                is_bg = execution_mode == "background" or tool_call_id in builder.bg_agent_id_map
                 bg_id = builder.bg_agent_id_map.get(tool_call_id, "")
                 result_text = ""
                 if failed:
@@ -1253,7 +1387,8 @@ def _parse_cli_jsonl_file(
                             result_text = str(result_obj)
                     # Background agents return a placeholder — use read_agent result instead
                     if not result_text or result_text.startswith("Agent started in background"):
-                        is_bg = True
+                        if execution_mode != "sync":
+                            is_bg = True
                         if bg_id:
                             result_text = builder.bg_agent_results.get(bg_id, "")
                         else:
@@ -1327,6 +1462,7 @@ def _parse_cli_jsonl_file(
                     file_changes=nested_consolidated_changes,
                 )
 
+                prompt = _get_tool_arg_str(req_args, "prompt")
                 stream_agent_id = event.get("agentId")
                 if stream_agent_id and stream_agent_id != _agent_id:
                     child_session = _parse_cli_jsonl_file(
@@ -1339,6 +1475,8 @@ def _parse_cli_jsonl_file(
                         logger.error("Failed to parse delegated agent stream %s in %s", stream_agent_id, file_path)
                         return None
                     if child_session.messages:
+                        if not prompt:
+                            prompt = next((message.content for message in child_session.messages if message.role == "user"), "")
                         child_msg = ChatMessage(
                             role="assistant",
                             content="",
@@ -1363,7 +1501,7 @@ def _parse_cli_jsonl_file(
                     content=content,
                     description=title,
                     child_message=child_msg,
-                    prompt=_get_tool_arg_str(req_args, "prompt"),
+                    prompt=prompt,
                     is_background=is_bg,
                     agent_id=stream_agent_id or (bg_id if is_bg else ""),
                 )
@@ -1537,9 +1675,25 @@ def _parse_cli_jsonl_file(
                 if answer:
                     builder.current_assistant_content_blocks.append(ContentBlock(kind="status", content=f"User answered: {answer}", description="user-input"))
 
+            elif event_type == "human_response.recorded":
+                response = event_data.get("response")
+                if not isinstance(response, dict):
+                    continue
+                if response.get("responseKind") != "exit_plan_mode" and (
+                    event_data.get("toolCallId") in _index.represented_question_tools or event_data.get("requestId") in _index.represented_question_requests
+                ):
+                    continue
+                formatted = _format_human_response(response)
+                if formatted:
+                    content, description = formatted
+                    if content:
+                        builder.note_assistant_event(event.get("id"))
+                        builder.current_assistant_content_blocks.append(ContentBlock(kind="ask_user", content=content, description=description))
+
             elif formatted_status := _format_session_event_status(event_type, event_data):
                 content, description = formatted_status
                 if content:
+                    builder.note_assistant_event(event.get("id"))
                     builder.current_assistant_content_blocks.append(ContentBlock(kind="status", content=content, description=description))
 
             # Skip internal/metadata events (already parsed in metadata extraction or no user content)
@@ -1624,6 +1778,15 @@ def _parse_cli_jsonl_file(
                 "factory.run_started",
                 "factory.run_updated",
                 "factory.run_settled",
+                "workflow.run_started",
+                "workflow.run_updated",
+                "workflow.run_settled",
+                "instruction.update",
+                "instruction.update_delivery",
+                "session.mode_notice_delivered",
+                "session.usage_record",
+                "session.tool_outcomes_recorded",
+                "program.execution",
             ):
                 pass
 

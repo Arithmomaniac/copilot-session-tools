@@ -13,6 +13,7 @@ from .scanner import ChatSession
 from .utils import (
     build_block_metadata,
     build_root_agent_markers,
+    compact_agent_label,
     detect_language,
     extract_filename,
     format_timestamp,
@@ -24,6 +25,7 @@ from .utils import (
     strip_ansi,
     truncate_preview,
     urldecode,
+    workflow_details,
 )
 from .utils import (
     generate_session_filename as _generate_filename,
@@ -45,6 +47,8 @@ def _get_jinja_env() -> Environment:
     env.filters["strip_ansi"] = strip_ansi
     env.filters["truncate_preview"] = truncate_preview
     env.filters["prettify_json"] = prettify_json
+    env.filters["workflow_details"] = workflow_details
+    env.filters["compact_agent_label"] = compact_agent_label
     env.globals["detect_language"] = detect_language
     env.globals["highlight_code"] = highlight_code
     env.globals["match_tool_for_block"] = match_tool_for_block

@@ -1,6 +1,7 @@
 """Content extraction, formatting, and utility helpers for scanner."""
 
 from pathlib import Path
+from typing import cast
 
 from .models import ChatMessage, ContentBlock
 
@@ -344,6 +345,16 @@ def _format_tool_display_message(
 ) -> str:
     """Generate a display message for a tool invocation using data-driven formats."""
     argument_dict: dict[str, object] = {str(key): value for key, value in arguments.items()} if isinstance(arguments, dict) else {}
+    if tool_name == "run_dynamic_workflow":
+        run_id = argument_dict.get("resumeFromRunId")
+        return f"Resuming workflow: {run_id}" if run_id else f"Running workflow: {argument_dict.get('name') or 'unknown'}"
+    if tool_name == "dynamic_workflows_manage":
+        operation = argument_dict.get("operation") or "list"
+        value = argument_dict.get("meta")
+        meta = cast("dict[str, object]", value) if isinstance(value, dict) else {}
+        name = meta.get("name")
+        target = argument_dict.get("runId") or argument_dict.get("name") or name
+        return f"Workflows: {operation} {target}" if target else f"Workflows: {operation}"
     fmt = _TOOL_DISPLAY_FORMATS.get(tool_name)
     if fmt:
         template, arg_keys = fmt

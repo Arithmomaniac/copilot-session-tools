@@ -26,6 +26,9 @@ from .utils import (
 from .utils import (
     urldecode as _urldecode,
 )
+from .utils import (
+    workflow_summary as _workflow_summary,
+)
 
 
 def _format_timestamp(value: str | int | None) -> str:
@@ -139,6 +142,11 @@ def _format_message_content(
     include_thinking: bool = False,
     include_agent_details: bool = True,
     include_tools: bool = True,
+    include_system_messages: bool = False,
+    include_diffs: bool = False,
+    include_tool_inputs: bool = False,
+    include_commands: bool = True,
+    include_file_changes: bool = True,
 ) -> str:
     """Format message content, optionally including thinking blocks and agent details.
 
@@ -172,8 +180,38 @@ def _format_message_content(
                     parts.append(f"*🤖 {agent_name} — {status}*")
                     continue
                 # Full content in a collapsible details block
-                agent_content = block.content.replace(chr(10), chr(10) + "> ")
-                parts.append(f"<details>\n<summary>{agent_name} — {status}</summary>\n\n> {agent_content}\n\n</details>")
+                agent_content = block.content
+                if block.child_message:
+                    child_message = block.child_message
+                    is_stream = (
+                        not child_message.content
+                        and bool(child_message.children)
+                        and len(child_message.content_blocks) == len(child_message.children)
+                        and all(part.kind == "subagent" and part.child_message is child for part, child in zip(child_message.content_blocks, child_message.children, strict=True))
+                    )
+                    nested_parts = []
+                    for child in child_message.children if is_stream else [child_message]:
+                        if child.role == "system" and not include_system_messages:
+                            continue
+                        child_content = message_to_markdown(
+                            child,
+                            include_thinking=include_thinking,
+                            include_agent_details=include_agent_details,
+                            include_tools=include_tools,
+                            include_system_messages=include_system_messages,
+                            include_diffs=include_diffs,
+                            include_tool_inputs=include_tool_inputs,
+                            include_commands=include_commands,
+                            include_file_changes=include_file_changes,
+                        )
+                        if child_content:
+                            nested_parts.append(f"**{child.role.title()}:**\n\n{child_content}" if is_stream else child_content)
+                    agent_content = "\n\n".join(nested_parts)
+                agent_content = "\n".join(f"> {line}" if line else ">" for line in agent_content.splitlines())
+                parts.append(f"<details>\n<summary>{agent_name} — {status}</summary>\n\n{agent_content}\n\n</details>")
+                continue
+            elif block.kind == "status" and block.description == "workflow":
+                parts.append(_workflow_summary(block.content))
                 continue
             elif block.kind == "status" and block.description == "task-complete":
                 tc_content = block.content.replace(chr(10), chr(10) + "> ")
@@ -312,6 +350,7 @@ def session_to_markdown(
             include_tools=include_tools,
             include_commands=include_commands,
             include_file_changes=include_file_changes,
+            include_system_messages=include_system_messages,
         )
         lines.append(msg_md)
 
@@ -328,6 +367,7 @@ def message_to_markdown(
     include_tools: bool = True,
     include_commands: bool = True,
     include_file_changes: bool = True,
+    include_system_messages: bool = False,
 ) -> str:
     """Convert a single message to markdown format.
 
@@ -363,6 +403,11 @@ def message_to_markdown(
         include_thinking=include_thinking,
         include_agent_details=include_agent_details,
         include_tools=include_tools,
+        include_system_messages=include_system_messages,
+        include_diffs=include_diffs,
+        include_tool_inputs=include_tool_inputs,
+        include_commands=include_commands,
+        include_file_changes=include_file_changes,
     )
     lines.append(content)
 
